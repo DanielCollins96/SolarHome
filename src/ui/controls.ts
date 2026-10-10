@@ -23,6 +23,8 @@ export interface SunReadout {
 export interface ControlsHandle {
   setReadout(readout: SunReadout): void;
   setStatus(message: string): void;
+  setSite(lede: string, meta: string): void;
+  tools: HTMLElement;
 }
 
 export function mountControls(
@@ -37,14 +39,14 @@ export function mountControls(
   panel.id = 'panel';
   panel.innerHTML = `
     <h1>SolarHome</h1>
-    <p class="lede">
-      Hardcoded house at ${DEMO_LOCATION.name}. Height and roof shape are illustrative, not measured.
-      Address search and traced outlines come later.
+    <p class="lede" id="site-lede">
+      Demonstration house at ${DEMO_LOCATION.name}. Search an address or trace an outline on the map.
     </p>
-    <p class="meta">
+    <p class="meta" id="site-meta">
       ${DEMO_LOCATION.latitude.toFixed(4)}°N, ${Math.abs(DEMO_LOCATION.longitude).toFixed(4)}°W
       · ${DEMO_LOCATION.timeZone}
     </p>
+    <div id="tools"></div>
     <label>
       Date
       <input id="date" type="date" value="${clock.date}" />
@@ -73,6 +75,9 @@ export function mountControls(
   const shadow = required<HTMLElement>(panel, '#shadow');
   const noonNote = required<HTMLElement>(panel, '#noon-note');
   const status = required<HTMLElement>(panel, '#status');
+  const lede = required<HTMLElement>(panel, '#site-lede');
+  const meta = required<HTMLElement>(panel, '#site-meta');
+  const tools = required<HTMLElement>(panel, '#tools');
 
   const publish = () => {
     timeLabel.textContent = formatMinutes(clock.minutes);
@@ -111,6 +116,11 @@ export function mountControls(
     setStatus(message) {
       status.textContent = message;
     },
+    setSite(ledeText, metaText) {
+      lede.textContent = ledeText;
+      meta.textContent = metaText;
+    },
+    tools,
   };
 }
 

@@ -1,5 +1,5 @@
 import * as SunCalc from 'suncalc';
-import { minutesInZone, parseISODate, timeZoneOffsetMinutes, zonedLocalToDate } from './zonedTime.ts';
+import { dateAtFixedOffset, minutesInZone, parseISODate, timeZoneOffsetMinutes, zonedLocalToDate } from './zonedTime.ts';
 
 /** Unit vector toward the sun. X = east, Y = up, Z = south. */
 export interface SunVector {
@@ -86,4 +86,18 @@ export function solarNoonLocalMinutes(
   const offset = timeZoneOffsetMinutes(midday, timeZone);
   const times = SunCalc.getTimes(midday, latitude, longitude, 0, offset);
   return minutesInZone(times.solarNoon, timeZone);
+}
+
+/** Solar noon as minutes since midnight in a fixed longitude offset, without daylight saving. */
+export function solarNoonMinutesAtOffset(
+  isoDate: string,
+  latitude: number,
+  longitude: number,
+  offsetMinutes: number,
+): number {
+  const { year, month, day } = parseISODate(isoDate);
+  const midday = dateAtFixedOffset(year, month, day, 12, 0, offsetMinutes);
+  const times = SunCalc.getTimes(midday, latitude, longitude, 0, offsetMinutes);
+  const local = new Date(times.solarNoon.getTime() + offsetMinutes * 60_000);
+  return local.getUTCHours() * 60 + local.getUTCMinutes();
 }

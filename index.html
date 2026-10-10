@@ -7,8 +7,13 @@
     <title>SolarHome</title>
   </head>
   <body>
-    <canvas id="view"></canvas>
-    <noscript>SolarHome needs JavaScript to draw the 3D scene.</noscript>
+    <div id="app">
+      <div id="map"></div>
+      <div id="stage">
+        <canvas id="view"></canvas>
+      </div>
+    </div>
+    <noscript>SolarHome needs JavaScript to draw the map and the 3D scene.</noscript>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

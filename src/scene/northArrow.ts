@@ -1,19 +1,18 @@
 import { ArrowHelper, CanvasTexture, Group, Sprite, SpriteMaterial, Vector3 } from 'three';
 
-/** A ground arrow pointing true north (-Z), plus a label at its tip. */
-export function createNorthArrow(): Group {
+/** A ground arrow pointing true north (-Z), placed just south of the house. */
+export function createNorthArrow(southEdge = 4): Group {
   const group = new Group();
   group.name = 'north-arrow';
 
-  // South of the house, in open ground, pointing toward -Z (north).
-  const origin = new Vector3(0, 0.2, 8.2);
+  const origin = new Vector3(0, 0.2, southEdge + 1.4);
   const arrow = new ArrowHelper(new Vector3(0, 0, -1), origin, 3.2, 0xc73838, 1.1, 0.6);
   arrow.name = 'north-arrow-shaft';
   group.add(arrow);
 
   const label = createNorthLabel();
   if (label) {
-    label.position.set(0, 1.6, 8.6);
+    label.position.set(0, 1.6, southEdge + 1.8);
     group.add(label);
   }
   return group;

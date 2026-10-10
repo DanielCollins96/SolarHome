@@ -21,19 +21,26 @@ describe('gable house mesh', () => {
   });
 
   it('points the south roof normal up and south', () => {
-    const normal = house.roof.getAttribute('normal');
-    if (!(normal instanceof BufferAttribute)) throw new Error('Expected a buffer normal.');
     const pitch = (DEMO_GABLE_HOUSE.pitchDegrees * Math.PI) / 180;
-    expect(normal.getX(0)).toBeCloseTo(0, 5);
-    expect(normal.getY(0)).toBeCloseTo(Math.cos(pitch), 5);
-    expect(normal.getZ(0)).toBeCloseTo(Math.sin(pitch), 5);
+    expect(hasNormal(house.roof, 0, Math.cos(pitch), Math.sin(pitch))).toBe(true);
   });
 
   it('points the south wall normal south', () => {
-    const normal = house.walls.getAttribute('normal');
-    if (!(normal instanceof BufferAttribute)) throw new Error('Expected a buffer normal.');
-    expect(normal.getX(0)).toBeCloseTo(0, 5);
-    expect(normal.getY(0)).toBeCloseTo(0, 5);
-    expect(normal.getZ(0)).toBeCloseTo(1, 5);
+    expect(hasNormal(house.walls, 0, 0, 1)).toBe(true);
   });
 });
+
+function hasNormal(geometry: { getAttribute(name: string): unknown }, x: number, y: number, z: number): boolean {
+  const normal = geometry.getAttribute('normal');
+  if (!(normal instanceof BufferAttribute)) throw new Error('Expected a buffer normal.');
+  for (let index = 0; index < normal.count; index += 1) {
+    if (
+      Math.abs(normal.getX(index) - x) < 1e-4 &&
+      Math.abs(normal.getY(index) - y) < 1e-4 &&
+      Math.abs(normal.getZ(index) - z) < 1e-4
+    ) {
+      return true;
+    }
+  }
+  return false;
+}

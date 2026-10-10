@@ -50,6 +50,22 @@ export function minutesInZone(instant: Date, timeZone: string): number {
   return parts.hour * 60 + parts.minute;
 }
 
+/** Whole-hour offset east of UTC, from longitude. This ignores daylight saving. */
+export function longitudeOffsetMinutes(longitude: number): number {
+  return Math.round(longitude / 15) * 60;
+}
+
+export function dateAtFixedOffset(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  offsetMinutes: number,
+): Date {
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, 0) - offsetMinutes * 60_000);
+}
+
 export function formatMinutes(minutes: number): string {
   const clamped = Math.min(1439, Math.max(0, Math.round(minutes)));
   const hour = Math.floor(clamped / 60);

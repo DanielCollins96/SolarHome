@@ -7,6 +7,82 @@ body {
   font-family: system-ui, sans-serif;
 }
 
+#app {
+  display: grid;
+  grid-template-columns: 320px minmax(240px, 1fr) minmax(320px, 1.3fr);
+  height: 100%;
+}
+
+#map,
+#stage {
+  min-width: 0;
+  height: 100%;
+}
+
+#map {
+  position: relative;
+}
+
+#area-box {
+  display: none;
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 2px solid #e23d3d;
+  background: rgba(226, 61, 61, 0.18);
+  pointer-events: none;
+}
+
+#map-help {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: min(240px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(18, 24, 32, 0.92);
+  color: #e7edf2;
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: auto;
+}
+
+#map-help p {
+  margin: 0 0 6px;
+}
+
+#map-help details {
+  margin-top: 6px;
+}
+
+#map-help summary {
+  cursor: pointer;
+}
+
+#map-help ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+
+#map-help button {
+  border: 0;
+  border-radius: 6px;
+  background: #d7e4f2;
+  color: #14202b;
+  padding: 6px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#stage {
+  position: relative;
+}
+
 #view {
   display: block;
   width: 100%;
@@ -14,18 +90,39 @@ body {
 }
 
 #panel {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  width: min(340px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
+  order: -1;
+  width: auto;
+  height: 100%;
+  max-height: 100%;
   overflow: auto;
   box-sizing: border-box;
   padding: 14px 16px 16px;
-  border-radius: 12px;
-  background: rgba(18, 24, 32, 0.9);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  background: rgba(18, 24, 32, 0.96);
   z-index: 2;
+}
+
+@media (max-width: 980px) {
+  #app {
+    grid-template-columns: minmax(220px, 240px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "panel map"
+      "panel stage";
+  }
+
+  #panel {
+    grid-area: panel;
+    order: 0;
+    height: 100%;
+  }
+
+  #map {
+    grid-area: map;
+  }
+
+  #stage {
+    grid-area: stage;
+  }
 }
 
 #panel h1 {
@@ -58,6 +155,9 @@ body {
 }
 
 #panel input[type='date'],
+#panel input[type='number'],
+#panel input[type='search'],
+#panel select,
 #panel button {
   width: 100%;
   box-sizing: border-box;
@@ -66,7 +166,10 @@ body {
   font: inherit;
 }
 
-#panel input[type='date'] {
+#panel input[type='date'],
+#panel input[type='number'],
+#panel input[type='search'],
+#panel select {
   background: #101820;
   color: #e7edf2;
   border: 1px solid #3d4c5c;
@@ -89,6 +192,41 @@ body {
 
 #panel button:hover {
   background: #edf3f8;
+}
+
+#address-results {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+#address-results button {
+  text-align: left;
+  background: transparent;
+  color: #d7e4f2;
+  border: 1px solid #3d4c5c;
+}
+
+.quality h2 {
+  margin: 8px 0 4px;
+  font-size: 16px;
+}
+
+.provenance,
+.issues {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  color: #c5d0da;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.issues {
+  color: #f0c7a0;
+}
+
+label.file input {
+  margin-top: 4px;
 }
 
 #panel dl {

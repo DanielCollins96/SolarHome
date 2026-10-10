@@ -85,18 +85,45 @@ export function createSunLight(target: Vector3): DirectionalLight {
   return sun;
 }
 
+/** Grow the shadow map so a larger traced or downloaded house still casts on the ground. */
+export function fitSunShadow(sun: DirectionalLight, radius: number): void {
+  const extent = Math.max(24, radius * 1.8);
+  sun.shadow.camera.left = -extent;
+  sun.shadow.camera.right = extent;
+  sun.shadow.camera.top = extent;
+  sun.shadow.camera.bottom = -extent;
+  sun.shadow.camera.far = Math.max(90, extent * 4);
+  sun.shadow.camera.updateProjectionMatrix();
+}
+
 export function createFillLight(): AmbientLight {
   return new AmbientLight(0xe7eef6, 0.55);
 }
 
 /** Move the directional light along the vector toward the sun. Intensity drops to 0 below the horizon. */
+export function frameHouse(camera: PerspectiveCamera, controls: OrbitControls, box: Box3): void {
+  const center = box.getCenter(new Vector3());
+  const size = box.getSize(new Vector3());
+  const radius = Math.max(size.x, size.y, size.z, 8) / 2;
+  const fov = (camera.fov * Math.PI) / 180;
+  const distance = Math.max(14, (radius / Math.sin(fov / 2)) * 1.2);
+  controls.minDistance = Math.max(2, radius * 0.15);
+  controls.maxDistance = Math.max(400, distance * 8);
+  camera.near = Math.max(0.1, distance / 300);
+  camera.far = Math.max(2000, distance * 12);
+  camera.updateProjectionMatrix();
+  camera.position.copy(center).add(new Vector3(1, 0.7, 1).normalize().multiplyScalar(distance));
+  controls.target.copy(center);
+  controls.update();
+}
+
 export function placeSun(
   sun: DirectionalLight,
   towardSun: SunVector,
   altitudeDeg: number,
   target: Vector3,
+  distance = 50,
 ): void {
-  const distance = 50;
   sun.target.position.copy(target);
   if (altitudeDeg <= 0) {
     sun.intensity = 0;

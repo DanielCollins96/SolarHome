@@ -1,6 +1,6 @@
 # SolarHome
 
-Browser tool for a centered 3D house and its sun. This repository is at **milestone 1**: a hardcoded house, live shadows, and a sun-direction test. Later milestones (address lookup, tracing, annual exposure, what-if structures) are not started.
+Browser tool for a real house outline, a centered 3D model, and live sun shadows. This repository is at **milestone 2**: address search, OpenStreetMap footprints, roof presets, and map tracing. Annual exposure and screenshot tracing are not started.
 
 ## Run
 
@@ -9,15 +9,21 @@ npm install
 npm run dev
 ```
 
-Open the URL Vite prints (usually http://localhost:5173). Drag to orbit, scroll to zoom, and move the date or time slider. **Jump to solar noon** puts the sun due south at Golden, Colorado, so the shadow falls north.
+Open the URL Vite prints. Search an address, pick a result, and the house rebuilds from the OpenStreetMap footprint. **Edit outline** lets you click corners, drag them, click an edge to split it, and right-click a corner to delete it. Roof type, pitch, eave height, and plan rotation update the 3D model when you leave the field. **Jump to solar noon** puts the sun due south.
 
 ```bash
 npm test
 npm run build
 ```
 
+`scripts/live-addresses.ts` repeats five live lookups. It is not part of `npm test`.
+
+```bash
+node --experimental-strip-types scripts/live-addresses.ts
+```
+
 ## Scene
 
-The house footprint centroid is the origin, the ground is y = 0, and the orbit target is the house bounding-box center. Axes are **X = east, Y = up, Z = south**. The site is fixed at Golden, Colorado (39.742476°N, 105.1786°W) until address search exists. Clock times are America/Denver.
+The house footprint centroid is the origin, the ground is y = 0, and the orbit target is the house bounding-box center. Axes are **X = east, Y = up, Z = south**. The demonstration house stays at Golden, Colorado, in America/Denver. A searched or imported house uses a fixed offset from longitude, without daylight saving.
 
-The house and the grey boxes are placeholders. Height and roof shape are not measured.
+Map data is © OpenStreetMap contributors, drawn with the OpenFreeMap vector style. Satellite imagery is not included.
