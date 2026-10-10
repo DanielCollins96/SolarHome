@@ -149,6 +149,7 @@ describe('house model', () => {
 
   it('reads height and roof from an assembled building', () => {
     const model = assembleHouse({
+      id: 'way/1',
       label: 'Sample',
       tags: { height: '9', 'roof:shape': 'flat', building: 'yes' },
       parts: [

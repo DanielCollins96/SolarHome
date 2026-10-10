@@ -4,8 +4,8 @@
  * (Reda & Andreas, 2004): Golden, Colorado. Elevation is not passed to SunCalc.getPosition.
  */
 export const DEMO_LOCATION = {
-  name: 'Golden, Colorado',
-  latitude: 39.742476,
-  longitude: -105.1786,
-  timeZone: 'America/Denver',
+  name: 'Calgary, Alberta',
+  latitude: 51.0447,
+  longitude: -114.0719,
+  timeZone: 'America/Edmonton',
 } as const;

@@ -44,6 +44,24 @@ export async function loadBuilding(hit: GeocodeHit, deps: OverpassDeps): Promise
   return chosen;
 }
 
+/** The building whose footprint contains this point. A nearby neighbor is not returned. */
+export async function loadBuildingUnder(latitude: number, longitude: number, deps: OverpassDeps): Promise<GeographicBuilding> {
+  const around = await fetchElements(aroundQuery(latitude, longitude), aroundKey({ latitude, longitude, label: '', osmType: 'node', osmId: 0 }), deps);
+  const buildings = around.flatMap((element) => toBuildings(element, element.tags?.name ?? 'Building'));
+  const containing = buildings.find((building) => buildingContains(building, latitude, longitude));
+  if (containing === undefined) {
+    throw new GeoFailure('not-found', 'Click on a building. A click between houses does not select a neighbor.');
+  }
+  return containing;
+}
+
+export function buildingContains(building: GeographicBuilding, latitude: number, longitude: number): boolean {
+  return building.parts.some((part) => {
+    const local = part.outer.map((point) => projectToLocal(point, { latitude, longitude }));
+    return pointInRing({ east: 0, north: 0 }, local);
+  });
+}
+
 export function buildingFromElements(elements: OverpassElement[], label: string): GeographicBuilding | null {
   const buildings = elements.flatMap((element) => toBuildings(element, label));
   return buildings[0] ?? null;
@@ -138,6 +156,7 @@ function toBuildings(element: OverpassElement, label: string): GeographicBuildin
 function buildingOf(element: OverpassElement, label: string, parts: GeographicRing[]): GeographicBuilding {
   const name = element.tags?.name;
   return {
+    id: `${element.type}/${element.id}`,
     label: name ?? label,
     tags: element.tags ?? {},
     parts,

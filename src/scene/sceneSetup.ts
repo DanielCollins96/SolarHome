@@ -1,12 +1,20 @@
 import {
   AmbientLight,
   Box3,
+  BoxGeometry,
   Color,
+  ConeGeometry,
   DirectionalLight,
+  Group,
+  Mesh,
+  MeshBasicMaterial,
+  MOUSE,
   Object3D,
   PCFShadowMap,
   PerspectiveCamera,
+  Quaternion,
   Scene,
+  SphereGeometry,
   Vector3,
   WebGLRenderer,
 } from 'three';
@@ -40,8 +48,9 @@ export function houseOrbitTarget(house: Object3D): Vector3 {
 }
 
 /**
- * Orbit around the house. Pan is off so the target cannot leave the house.
- * The target is reapplied every frame as well.
+ * Same gestures as the map: left-drag moves the view, right-drag turns it,
+ * scroll zooms. Pan is in screen space so a left drag slides the ground
+ * the way the map does.
  */
 export function createOrbitControls(
   camera: PerspectiveCamera,
@@ -50,7 +59,13 @@ export function createOrbitControls(
 ): OrbitControls {
   const controls = new OrbitControls(camera, canvas);
   controls.target.copy(target);
-  controls.enablePan = false;
+  controls.enablePan = true;
+  controls.screenSpacePanning = true;
+  controls.mouseButtons = {
+    LEFT: MOUSE.PAN,
+    MIDDLE: MOUSE.DOLLY,
+    RIGHT: MOUSE.ROTATE,
+  };
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.maxPolarAngle = Math.PI / 2 - 0.04;
@@ -58,6 +73,42 @@ export function createOrbitControls(
   controls.maxDistance = 80;
   controls.update();
   return controls;
+}
+
+/** Bright disc kept in front of the camera so the sun reads as a place in the sky. */
+export function createSunMarker(): Group {
+  const marker = new Group();
+  marker.name = 'sun-marker';
+  const glow = new Mesh(
+    new SphereGeometry(1.7, 24, 16),
+    new MeshBasicMaterial({
+      color: 0xfff3b0,
+      transparent: true,
+      opacity: 0.45,
+      toneMapped: false,
+      depthWrite: false,
+    }),
+  );
+  const disc = new Mesh(
+    new SphereGeometry(1, 24, 16),
+    new MeshBasicMaterial({ color: 0xffd23a, toneMapped: false }),
+  );
+  marker.add(glow);
+  marker.add(disc);
+  return marker;
+}
+
+/** Thick ground arrow. Local +X points toward the sun. */
+export function createSunArrow(): Group {
+  const arrow = new Group();
+  arrow.name = 'sun-arrow';
+  const material = new MeshBasicMaterial({ color: 0xffc107, toneMapped: false });
+  const shaft = new Mesh(new BoxGeometry(1, 1, 1), material);
+  const head = new Mesh(new ConeGeometry(1, 1, 16), material);
+  head.rotation.z = -Math.PI / 2;
+  arrow.add(shaft);
+  arrow.add(head);
+  return arrow;
 }
 
 /**
@@ -117,6 +168,54 @@ export function frameHouse(camera: PerspectiveCamera, controls: OrbitControls, b
   controls.update();
 }
 
+/** Park the disc along the sun vector, sized so it stays obvious as you zoom. */
+export function placeSunMarker(
+  marker: Object3D,
+  towardSun: SunVector,
+  altitudeDeg: number,
+  target: Vector3,
+  camera: PerspectiveCamera,
+): void {
+  marker.visible = altitudeDeg > 0;
+  if (!marker.visible) return;
+  const distance = Math.max(16, camera.position.distanceTo(target) * 0.78);
+  marker.position.set(
+    target.x + towardSun.x * distance,
+    target.y + towardSun.y * distance,
+    target.z + towardSun.z * distance,
+  );
+  marker.scale.setScalar(distance * 0.12);
+}
+
+const sunArrowAxis = new Vector3(1, 0, 0);
+const sunArrowDirection = new Vector3();
+const sunArrowTurn = new Quaternion();
+
+/** Point the ground arrow at the sun, starting outside the building. Hidden when the sun is down. */
+export function placeSunArrow(
+  arrow: Group,
+  towardSun: SunVector,
+  altitudeDeg: number,
+  target: Vector3,
+  length: number,
+): void {
+  const horizontal = Math.hypot(towardSun.x, towardSun.z);
+  arrow.visible = altitudeDeg > 0 && horizontal > 1e-4;
+  if (!arrow.visible) return;
+  const shaft = arrow.children[0];
+  const head = arrow.children[1];
+  if (shaft === undefined || head === undefined) return;
+  const reach = Math.max(10, length * 0.7);
+  shaft.scale.set(reach, 1.6, 1.6);
+  shaft.position.set(reach / 2, 0, 0);
+  head.scale.set(2.4, 3.2, 2.4);
+  head.position.set(reach + 1.6, 0, 0);
+  sunArrowDirection.set(towardSun.x / horizontal, 0, towardSun.z / horizontal);
+  arrow.position.copy(target).addScaledVector(sunArrowDirection, length * 0.35);
+  arrow.position.y = 0.9;
+  arrow.quaternion.copy(sunArrowTurn.setFromUnitVectors(sunArrowAxis, sunArrowDirection));
+}
+
 export function placeSun(
   sun: DirectionalLight,
   towardSun: SunVector,
@@ -146,6 +245,8 @@ export function resizeRenderer(
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   if (width === 0 || height === 0) return;
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
   renderer.setSize(width, height, false);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();

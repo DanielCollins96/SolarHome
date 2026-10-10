@@ -24,6 +24,7 @@ export interface ControlsHandle {
   setReadout(readout: SunReadout): void;
   setStatus(message: string): void;
   setSite(lede: string, meta: string): void;
+  setView(view: 'map' | 'plane'): void;
   tools: HTMLElement;
 }
 
@@ -33,35 +34,42 @@ export function mountControls(
   options: {
     onChange: () => void;
     solarNoonMinutes: (isoDate: string) => number;
+    onView: (view: 'map' | 'plane') => void;
   },
 ): ControlsHandle {
   const panel = document.createElement('aside');
   panel.id = 'panel';
   panel.innerHTML = `
-    <h1>SolarHome</h1>
-    <p class="lede" id="site-lede">
-      Demonstration house at ${DEMO_LOCATION.name}. Search an address or trace an outline on the map.
-    </p>
-    <p class="meta" id="site-meta">
-      ${DEMO_LOCATION.latitude.toFixed(4)}°N, ${Math.abs(DEMO_LOCATION.longitude).toFixed(4)}°W
-      · ${DEMO_LOCATION.timeZone}
-    </p>
-    <div id="tools"></div>
-    <label>
-      Date
-      <input id="date" type="date" value="${clock.date}" />
-    </label>
-    <label>
-      Local time <strong id="time-label">${formatMinutes(clock.minutes)}</strong>
-      <input id="time" type="range" min="0" max="1439" step="1" value="${clock.minutes}" />
-    </label>
-    <button id="solar-noon" type="button">Jump to solar noon</button>
+    <div class="bar">
+      <h1>SolarHome</h1>
+      <div class="view-toggle" role="group" aria-label="View">
+        <button id="show-map" type="button" aria-pressed="true">Map</button>
+        <button id="show-plane" type="button" aria-pressed="false">3D</button>
+      </div>
+      <div id="tools"></div>
+      <label>
+        Date
+        <input id="date" type="date" value="${clock.date}" />
+      </label>
+      <div class="time-row">
+        <label class="time-label">
+          Local time <strong id="time-label">${formatMinutes(clock.minutes)}</strong>
+          <input id="time" type="range" min="0" max="1439" step="1" value="${clock.minutes}" />
+        </label>
+        <button id="play-time" type="button" aria-pressed="false">Play</button>
+      </div>
+      <button id="solar-noon" type="button">Solar noon</button>
+      <p class="meta" id="site-meta">
+        ${DEMO_LOCATION.latitude.toFixed(4)}°N, ${Math.abs(DEMO_LOCATION.longitude).toFixed(4)}°W
+      </p>
+    </div>
+    <p class="lede" id="site-lede">Demonstration house at ${DEMO_LOCATION.name}. Click a building, or shift-drag a small box.</p>
+    <p id="noon-note" class="note"></p>
     <dl>
       <div><dt>Sun altitude</dt><dd id="altitude">—</dd></div>
       <div><dt>Sun azimuth</dt><dd id="azimuth">—</dd></div>
       <div><dt>Shadow falls</dt><dd id="shadow">—</dd></div>
     </dl>
-    <p id="noon-note" class="note"></p>
     <p id="status" class="status"></p>
   `;
   parent.append(panel);
@@ -78,6 +86,47 @@ export function mountControls(
   const lede = required<HTMLElement>(panel, '#site-lede');
   const meta = required<HTMLElement>(panel, '#site-meta');
   const tools = required<HTMLElement>(panel, '#tools');
+  const showMap = required<HTMLButtonElement>(panel, '#show-map');
+  const showPlane = required<HTMLButtonElement>(panel, '#show-plane');
+  const playButton = required<HTMLButtonElement>(panel, '#play-time');
+  const setView = (view: 'map' | 'plane') => {
+    showMap.setAttribute('aria-pressed', view === 'map' ? 'true' : 'false');
+    showPlane.setAttribute('aria-pressed', view === 'plane' ? 'true' : 'false');
+  };
+  showMap.addEventListener('click', () => {
+    setView('map');
+    options.onView('map');
+  });
+  showPlane.addEventListener('click', () => {
+    setView('plane');
+    options.onView('plane');
+  });
+
+  let playing = false;
+  let lastTick = 0;
+  const stopPlay = () => {
+    playing = false;
+    lastTick = 0;
+    playButton.textContent = 'Play';
+    playButton.setAttribute('aria-pressed', 'false');
+  };
+  const tickPlay = (now: number) => {
+    if (!playing) return;
+    if (lastTick !== 0) {
+      const delta = Math.min(100, now - lastTick);
+      clock.minutes = (clock.minutes + (delta / 1000) * 60) % 1440;
+      publish();
+    }
+    lastTick = now;
+    requestAnimationFrame(tickPlay);
+  };
+  playButton.addEventListener('click', () => {
+    playing = !playing;
+    playButton.textContent = playing ? 'Pause' : 'Play';
+    playButton.setAttribute('aria-pressed', playing ? 'true' : 'false');
+    if (playing) requestAnimationFrame(tickPlay);
+    else lastTick = 0;
+  });
 
   const publish = () => {
     timeLabel.textContent = formatMinutes(clock.minutes);
@@ -92,6 +141,7 @@ export function mountControls(
   });
 
   timeInput.addEventListener('input', () => {
+    stopPlay();
     clock.minutes = Number(timeInput.value);
     timeLabel.textContent = formatMinutes(clock.minutes);
     options.onChange();
@@ -120,6 +170,7 @@ export function mountControls(
       lede.textContent = ledeText;
       meta.textContent = metaText;
     },
+    setView,
     tools,
   };
 }

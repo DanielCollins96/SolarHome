@@ -1,6 +1,6 @@
-import type { Feature, FeatureCollection } from 'geojson';
+import type { Feature, FeatureCollection, GeoJsonProperties, Position } from 'geojson';
 import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
-import type { GeoJSONSource, MapMouseEvent } from 'maplibre-gl';
+import type { GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { LngLat } from '../geo/projection.ts';
@@ -19,14 +19,25 @@ export interface AreaBounds {
   east: number;
 }
 
+export interface PickedFootprint {
+  id: string;
+  label: string;
+  outer: LngLat[];
+  holes: LngLat[][];
+  heightM: number | null;
+}
+
 export interface MapController {
   setTrace(ring: LngLat[]): void;
   setFootprints(rings: LngLat[][]): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
+  setNote(note: string): void;
+  clearSelectionBox(): void;
   flyTo(longitude: number, latitude: number): void;
   previewPlace(longitude: number, latitude: number): void;
+  setBearing(degrees: number): void;
   resize(): void;
 }
 
@@ -38,6 +49,7 @@ export function mountMap(
     onTrace: (ring: LngLat[]) => void;
     onPick: (point: LngLat) => void;
     onArea: (bounds: AreaBounds) => void;
+    onBuildings: (buildings: PickedFootprint[], mode: 'replace' | 'toggle') => void;
   },
 ): MapController {
   const map = new MapLibreMap({
@@ -57,9 +69,26 @@ export function mountMap(
   const areaBox = document.createElement('div');
   areaBox.id = 'area-box';
   container.append(areaBox);
-  const help = mountMapHelp(container, () => {
+  const help = mountMapHelp(container);
+  const recenter = document.createElement('button');
+  recenter.id = 'recenter';
+  recenter.type = 'button';
+  recenter.title = 'Return to selected area';
+  recenter.setAttribute('aria-label', 'Return to selected area');
+  recenter.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"></circle>
+      <path d="M12 2.5v3.2M12 18.3v3.2M2.5 12h3.2M18.3 12h3.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+      <circle cx="12" cy="12" r="7.2" fill="none" stroke="currentColor" stroke-width="2"></circle>
+    </svg>
+  `;
+  const returnToSelection = (event: Event) => {
+    event.stopPropagation();
     focusOutline(map, footprints.length > 0 ? footprints : [vertices], options.longitude, options.latitude);
-  });
+  };
+  recenter.addEventListener('mousedown', (event) => event.stopPropagation());
+  recenter.addEventListener('click', returnToSelection);
+  container.append(recenter);
 
   map.on('load', () => {
     map.addSource('osm', { type: 'geojson', data: emptyCollection() });
@@ -97,7 +126,6 @@ export function mountMap(
   map.on('mousedown', (event: MapMouseEvent) => {
     if (event.originalEvent.shiftKey && !tracing) {
       boxStart = { x: event.point.x, y: event.point.y };
-      suppressClick = true;
       map.dragPan.disable();
       placeAreaBox(areaBox, boxStart, boxStart);
       event.preventDefault();
@@ -138,10 +166,26 @@ export function mountMap(
   const finishBox = (point: { x: number; y: number }) => {
     const start = boxStart;
     boxStart = null;
-    areaBox.style.display = 'none';
     map.dragPan.enable();
     if (start === null) return;
-    if (Math.hypot(point.x - start.x, point.y - start.y) < 12) return;
+    if (Math.hypot(point.x - start.x, point.y - start.y) < 12) {
+      areaBox.style.display = 'none';
+      return;
+    }
+    const visible = buildingsInRect(map, start, point);
+    if (visible.length > 25) {
+      areaBox.style.display = 'none';
+      help.setNote('Zoom in and drag a smaller box. That area has too many houses.');
+      swallowFollowingClick();
+      return;
+    }
+    if (visible.length > 0) {
+      areaBox.style.display = 'none';
+      options.onBuildings(visible, 'replace');
+      swallowFollowingClick();
+      return;
+    }
+    help.setNote('Loading buildings…');
     const first = map.unproject([start.x, start.y]);
     const second = map.unproject([point.x, point.y]);
     options.onArea({
@@ -150,6 +194,14 @@ export function mountMap(
       west: Math.min(first.lng, second.lng),
       east: Math.max(first.lng, second.lng),
     });
+    swallowFollowingClick();
+  };
+  let swallowClick = false;
+  const swallowFollowingClick = () => {
+    swallowClick = true;
+    window.setTimeout(() => {
+      swallowClick = false;
+    }, 0);
   };
   map.on('mouseup', (event: MapMouseEvent) => {
     if (boxStart !== null) finishBox(event.point);
@@ -158,11 +210,14 @@ export function mountMap(
   map.on('mouseout', endDrag);
   map.on('click', (event: MapMouseEvent) => {
     if (!tracing) {
-      if (suppressClick) {
+      if (suppressClick || swallowClick) {
         suppressClick = false;
+        swallowClick = false;
         return;
       }
-      options.onPick(toLngLat(event));
+      const hit = buildingsAt(map, event.point)[0];
+      if (hit !== undefined) options.onBuildings([hit], 'toggle');
+      else options.onPick(toLngLat(event));
       return;
     }
     if (suppressClick) {
@@ -183,6 +238,7 @@ export function mountMap(
     publish(true);
   });
   map.on('contextmenu', (event: MapMouseEvent) => {
+    event.preventDefault();
     if (!tracing) return;
     const index = vertexUnder(map, event);
     if (index === null) return;
@@ -228,6 +284,12 @@ export function mountMap(
       if (next) map.doubleClickZoom.disable();
       else map.doubleClickZoom.enable();
     },
+    setNote(note) {
+      help.setNote(note);
+    },
+    clearSelectionBox() {
+      areaBox.style.display = 'none';
+    },
     flyTo(longitude, latitude) {
       focusOutline(map, footprints.length > 0 ? footprints : [vertices], longitude, latitude);
     },
@@ -239,37 +301,36 @@ export function mountMap(
       }
       show();
     },
+    setBearing(degrees) {
+      map.setBearing(degrees);
+    },
     resize() {
       map.resize();
     },
   };
 }
 
-function mountMapHelp(
-  container: HTMLElement,
-  onShowHouse: () => void,
-): { setStatus: (buildingCount: number, cornerCount: number, tracing: boolean) => void } {
+function mountMapHelp(container: HTMLElement): {
+  setStatus: (buildingCount: number, cornerCount: number, tracing: boolean) => void;
+  setNote: (note: string) => void;
+} {
   const help = document.createElement('section');
   help.id = 'map-help';
   help.innerHTML = `
     <p id="map-summary"></p>
-    <button id="show-house" type="button">Show house</button>
+    <p id="map-note"></p>
     <details>
       <summary>How to use the map</summary>
       <ul>
-        <li>Hold <strong>Shift</strong> and drag a box. The buildings in that box appear in red and in the 3D view.</li>
-        <li>Click one building to load only that building.</li>
-        <li>Drag to move. Scroll to zoom. <strong>Show house</strong> frames the red outlines.</li>
-        <li>Roof, height, and pitch change the 3D model. <strong>Edit outline</strong> changes one red shape.</li>
+        <li>Click a gray building to add it. Click a red one to remove it.</li>
+        <li>Hold <strong>Shift</strong> and drag a box to select the buildings in that block.</li>
+        <li>Left-drag to move. Right-drag to turn. Scroll to zoom. The target button returns to the selected outlines.</li>
       </ul>
     </details>
   `;
   container.append(help);
   const summary = help.querySelector<HTMLElement>('#map-summary');
-  help.querySelector('#show-house')?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    onShowHouse();
-  });
+  const note = help.querySelector<HTMLElement>('#map-note');
   return {
     setStatus(buildingCount, cornerCount, tracing) {
       if (summary === null) return;
@@ -278,14 +339,17 @@ function mountMapHelp(
         return;
       }
       if (buildingCount > 1) {
-        summary.textContent = `${buildingCount} buildings. Shift-drag to select a different area.`;
+        summary.textContent = `${buildingCount} buildings. Click a red one to remove it, or click another to add it.`;
         return;
       }
       if (buildingCount === 1) {
-        summary.textContent = `1 building, ${cornerCount} corners. Shift-drag to load a whole block.`;
+        summary.textContent = `1 building. Click another to add it, or click this one to remove it.`;
         return;
       }
-      summary.textContent = 'Shift-drag a box to load the buildings inside it.';
+      summary.textContent = 'Click buildings to select them. Shift-drag selects a whole block.';
+    },
+    setNote(text) {
+      if (note !== null) note.textContent = text;
     },
   };
 }
@@ -332,6 +396,107 @@ function focusOutline(map: MapLibreMap, rings: readonly (readonly LngLat[])[], l
       maxZoom: 19,
     },
   );
+}
+
+function buildingsAt(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint[] {
+  return footprintsFrom(queryBuildings(map, [point.x, point.y]));
+}
+
+function buildingsInRect(
+  map: MapLibreMap,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): PickedFootprint[] {
+  const first = map.unproject([start.x, start.y]);
+  const second = map.unproject([end.x, end.y]);
+  const south = Math.min(first.lat, second.lat);
+  const north = Math.max(first.lat, second.lat);
+  const west = Math.min(first.lng, second.lng);
+  const east = Math.max(first.lng, second.lng);
+  return footprintsFrom(
+    queryBuildings(map, [
+      [start.x, start.y],
+      [end.x, end.y],
+    ]),
+  ).filter((building) => centerInside(building.outer, south, west, north, east));
+}
+
+function centerInside(ring: readonly LngLat[], south: number, west: number, north: number, east: number): boolean {
+  if (ring.length === 0) return false;
+  const latitude = ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length;
+  const longitude = ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length;
+  return latitude >= south && latitude <= north && longitude >= west && longitude <= east;
+}
+
+function queryBuildings(map: MapLibreMap, geometry: [number, number] | [[number, number], [number, number]]): MapGeoJSONFeature[] {
+  if (!map.isStyleLoaded()) return [];
+  const layers = buildingLayerIds(map);
+  const queried = layers.length > 0 ? map.queryRenderedFeatures(geometry, { layers }) : map.queryRenderedFeatures(geometry);
+  return queried.filter((feature) => layers.length > 0 || feature.sourceLayer === 'building');
+}
+
+function buildingLayerIds(map: MapLibreMap): string[] {
+  const layers = map.getStyle()?.layers ?? [];
+  const ids: string[] = [];
+  for (const layer of layers) {
+    if ('source-layer' in layer && layer['source-layer'] === 'building') ids.push(layer.id);
+  }
+  return ids;
+}
+
+function footprintsFrom(features: readonly MapGeoJSONFeature[]): PickedFootprint[] {
+  const picks: PickedFootprint[] = [];
+  for (const feature of features) {
+    const rings = outerRings(feature);
+    const outer = rings[0];
+    if (outer === undefined || outer.length < 3) continue;
+    const id = feature.id !== undefined && feature.id !== null ? `way/${feature.id}` : ringId(outer);
+    const existing = picks.find((pick) => pick.id === id);
+    if (existing !== undefined) {
+      if (outer.length > existing.outer.length) existing.outer = outer;
+      continue;
+    }
+    picks.push({
+      id,
+      label: readLabel(feature.properties),
+      outer,
+      holes: rings.slice(1).filter((ring) => ring.length >= 3),
+      heightM: readHeight(feature.properties),
+    });
+  }
+  return picks;
+}
+
+function outerRings(feature: MapGeoJSONFeature): LngLat[][] {
+  if (feature.geometry.type === 'Polygon') return feature.geometry.coordinates.map(toRing);
+  if (feature.geometry.type === 'MultiPolygon') return feature.geometry.coordinates.map((polygon) => toRing(polygon[0] ?? []));
+  return [];
+}
+
+function toRing(coordinates: Position[]): LngLat[] {
+  const ring = coordinates.map((position) => ({ longitude: position[0] ?? 0, latitude: position[1] ?? 0 }));
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (first !== undefined && last !== undefined && Math.abs(first.longitude - last.longitude) < 1e-7 && Math.abs(first.latitude - last.latitude) < 1e-7) {
+    ring.pop();
+  }
+  return ring;
+}
+
+function ringId(ring: readonly LngLat[]): string {
+  const first = ring[0];
+  return `ring/${first?.longitude.toFixed(5) ?? 0}/${first?.latitude.toFixed(5) ?? 0}/${ring.length}`;
+}
+
+function readLabel(properties: GeoJsonProperties): string {
+  const name = properties?.name;
+  return typeof name === 'string' && name !== '' ? name : 'Building';
+}
+
+function readHeight(properties: GeoJsonProperties): number | null {
+  const raw = properties?.render_height ?? properties?.height;
+  const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function placeAreaBox(box: HTMLElement, start: { x: number; y: number }, end: { x: number; y: number }): void {

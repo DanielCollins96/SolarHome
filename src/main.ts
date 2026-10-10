@@ -1,12 +1,12 @@
 import './style.css';
 import { Box3, Line, Mesh, PlaneGeometry, Sprite, Vector3, type Material, type Object3D } from 'three';
-import { assembleBuildings, assembleHouse, assembleTrace } from './house/assemble.ts';
+import { assembleBuildings, assembleHouse, assembleTrace, type GeographicBuilding } from './house/assemble.ts';
 import { demoHouseModel } from './house/demoHouse.ts';
 import { createHouseObject } from './house/houseMesh.ts';
-import { withEaveHeight, withOrientation, withRoof, type HouseModel } from './house/houseModel.ts';
+import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
 import { GeoFailure, searchAddresses } from './geo/geocode.ts';
-import { loadBuilding, loadBuildingsInBounds } from './geo/overpass.ts';
+import { buildingContains, loadBuilding, loadBuildingUnder, loadBuildingsInBounds } from './geo/overpass.ts';
 import { unprojectRing } from './geo/projection.ts';
 import { DEMO_LOCATION } from './scene/demoLocation.ts';
 import { createGround, createGroundGrid } from './scene/groundPlane.ts';
@@ -18,11 +18,15 @@ import {
   createOrbitControls,
   createRenderer,
   createScene,
+  createSunArrow,
   createSunLight,
+  createSunMarker,
   fitSunShadow,
   frameHouse,
   houseOrbitTarget,
   placeSun,
+  placeSunArrow,
+  placeSunMarker,
   resizeRenderer,
 } from './scene/sceneSetup.ts';
 import {
@@ -31,13 +35,13 @@ import {
   solarNoonLocalMinutes,
   solarNoonMinutesAtOffset,
   sunDirection,
+  type SunDirection,
 } from './sun/sunPosition.ts';
 import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, zonedLocalToDate } from './sun/zonedTime.ts';
 import { mountAddressSearch } from './ui/addressSearch.ts';
-import { mountCompass } from './ui/compass.ts';
+import { mountCompass, mountSunBadge } from './ui/compass.ts';
 import { DEFAULT_CLOCK, mountControls } from './ui/controls.ts';
-import { mountMap, type AreaBounds } from './ui/mapView.ts';
-import { mountQualityPanel } from './ui/qualityPanel.ts';
+import { mountMap, type AreaBounds, type PickedFootprint } from './ui/mapView.ts';
 
 const app = document.querySelector<HTMLElement>('#app');
 const canvas = document.querySelector<HTMLCanvasElement>('#view');
@@ -47,10 +51,13 @@ if (!app || !canvas || !mapHost || !stage) throw new Error('The page layout is m
 
 const clock = { ...DEFAULT_CLOCK };
 const compass = mountCompass(stage);
+const sunBadge = mountSunBadge(stage);
 let updateSun = () => {};
+let showView = (_view: 'map' | 'plane') => {};
 const panel = mountControls(app, clock, {
   onChange: () => updateSun(),
   solarNoonMinutes: (isoDate) => solarNoonMinutes(isoDate),
+  onView: (view) => showView(view),
 });
 
 let persistent: KeyValueStore | undefined;
@@ -80,6 +87,7 @@ let site: Site = {
   label: DEMO_LOCATION.name,
 };
 let model = demoHouseModel();
+let picked: GeographicBuilding[] = [];
 let viewRadius = 12;
 let searchToken = 0;
 const searchAbort = { current: new AbortController() };
@@ -111,7 +119,13 @@ try {
   const sunLight = createSunLight(orbitTarget);
   scene.add(sunLight);
   scene.add(sunLight.target);
+  const sunMarker = createSunMarker();
+  const sunArrow = createSunArrow();
+  scene.add(sunMarker);
+  scene.add(sunArrow);
   scene.add(createFillLight());
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+  let sunNow: SunDirection | null = null;
 
   const map = mountMap(mapHost, {
     longitude: site.longitude,
@@ -126,47 +140,9 @@ try {
     onArea: (bounds) => {
       void runArea(bounds);
     },
-  });
-
-  const quality = mountQualityPanel(panel.tools, {
-    onEave: (meters) => {
-      model = withEaveHeight(model, meters);
-      showHouse(model, { syncMap: false, fly: false, demo: false });
+    onBuildings: (buildings, mode) => {
+      applyPicked(buildings, mode);
     },
-    onRoof: (roof) => {
-      model = withRoof(model, roof);
-      showHouse(model, { syncMap: false, fly: false, demo: false });
-    },
-    onOrientation: (degrees) => {
-      model = withOrientation(model, degrees);
-      showHouse(model, { syncMap: false, fly: false, demo: false });
-    },
-    onTracing: (tracing) => {
-      map.setTracing(tracing);
-      panel.setStatus(
-        tracing
-          ? 'Click to add a corner, drag a corner, click an edge to split it, right-click a corner to delete it.'
-          : 'Outline editing is off, so the map can pan.',
-      );
-    },
-    onOpacity: (opacity) => map.setOpacity(opacity),
-    onNewOutline: () => {
-      map.setTrace([]);
-      panel.setStatus('Click the map to start a new outline. The house updates once it has three corners.');
-    },
-    onImport: (imported) => {
-      model = imported;
-      site = {
-        latitude: imported.origin.latitude,
-        longitude: imported.origin.longitude,
-        timeZone: null,
-        label: imported.label,
-      };
-      describeSite('Imported house. Time uses a fixed offset from longitude, without daylight saving.');
-      map.setOsmRing([]);
-      showHouse(model, { syncMap: true, fly: true, demo: false });
-    },
-    houseObject: () => house,
   });
 
   const address = mountAddressSearch(panel.tools, {
@@ -187,7 +163,10 @@ try {
         ? dateAtFixedOffset(year, month, day, hour, minute, longitudeOffsetMinutes(site.longitude))
         : zonedLocalToDate(year, month, day, hour, minute, site.timeZone);
     const sun = sunDirection(instant, site.latitude, site.longitude);
+    sunNow = sun;
     placeSun(sunLight, sun, sun.altitudeDeg, orbitTarget, Math.max(50, viewRadius * 4));
+    placeSunMarker(sunMarker, sun, sun.altitudeDeg, orbitTarget, camera);
+    placeSunArrow(sunArrow, sun, sun.altitudeDeg, orbitTarget, Math.max(16, viewRadius * 2.4));
     const shadow = shadowFallDirection(sun);
     panel.setReadout({
       altitudeDeg: sun.altitudeDeg,
@@ -222,7 +201,6 @@ try {
     arrow = createNorthArrow(box.max.z);
     scene.add(arrow);
     neighbours.visible = options.demo;
-    quality.setModel(next);
     if (options.syncMap) {
       map.setFootprints(next.parts.map((part) => unprojectRing(part.footprint, next.origin)));
     }
@@ -230,7 +208,7 @@ try {
     updateSun();
     if (options.announce === false) return;
     const warning = built.warnings[0];
-    panel.setStatus(warning ?? `${next.label}. Drag the 3D view to orbit. Scroll to zoom.`);
+    panel.setStatus(warning ?? `${next.label}. Left-drag moves the view. Right-drag turns it.`);
   }
 
   async function runSearch(query: string): Promise<void> {
@@ -259,31 +237,80 @@ try {
     }
   }
 
+  let pickBusy = false;
+
   async function runPick(point: { latitude: number; longitude: number }): Promise<void> {
-    await runSelect({
-      label: 'Selected building',
-      latitude: point.latitude,
-      longitude: point.longitude,
-      osmType: 'node',
-      osmId: 0,
-    });
+    if (pickBusy) return;
+    const existing = picked.findIndex((building) => buildingContains(building, point.latitude, point.longitude));
+    if (existing >= 0) {
+      picked.splice(existing, 1);
+      showPicked(picked.length === 0 ? 'Selection cleared.' : 'Removed that building.');
+      return;
+    }
+    pickBusy = true;
+    address.setBusy(true);
+    address.setMessage('Adding that building…');
+    try {
+      const building = await loadBuildingUnder(point.latitude, point.longitude, { fetch, cache });
+      picked = picked.filter((item) => item.id !== building.id);
+      picked.push(building);
+      showPicked('Added that building.');
+    } catch (error) {
+      address.setMessage(failureText(error));
+    } finally {
+      pickBusy = false;
+      address.setBusy(false);
+    }
+  }
+
+  function showPicked(note: string, fly = false): void {
+    if (picked.length === 0) {
+      map.setFootprints([]);
+      address.setMessage('Nothing selected. Click a building to start, or shift-drag a box.');
+      return;
+    }
+    model = assembleBuildings(picked);
+    site = { latitude: model.origin.latitude, longitude: model.origin.longitude, timeZone: null, label: model.label };
+    describeSite(`${model.label}. Time uses a fixed offset from longitude, without daylight saving.`);
+    showHouse(model, { syncMap: true, fly, demo: false, announce: false });
+    const count = picked.length === 1 ? '1 building' : `${picked.length} buildings`;
+    const message = `${count}. ${note} Click another to add it, or click a red one to remove it.`;
+    address.setMessage(message);
+    map.setNote(message);
   }
 
   async function runArea(bounds: AreaBounds): Promise<void> {
     address.setBusy(true);
     address.setMessage('Loading the buildings in that box…');
     try {
-      const buildings = await loadBuildingsInBounds(bounds, { fetch, cache });
-      model = assembleBuildings(buildings);
-      site = { latitude: model.origin.latitude, longitude: model.origin.longitude, timeZone: null, label: model.label };
-      describeSite(`${model.label}. Time uses a fixed offset from longitude, without daylight saving.`);
-      showHouse(model, { syncMap: true, fly: true, demo: false });
-      address.setMessage(`${buildings.length} buildings. Shift-drag to select another area.`);
+      picked = await loadBuildingsInBounds(bounds, { fetch, cache });
+      showPicked('Box selection replaced the previous buildings.');
     } catch (error) {
       address.setMessage(failureText(error));
+      map.setNote(failureText(error));
     } finally {
+      map.clearSelectionBox();
       address.setBusy(false);
     }
+  }
+
+  function applyPicked(buildings: PickedFootprint[], mode: 'replace' | 'toggle'): void {
+    const next = buildings.map(footprintToBuilding);
+    if (mode === 'replace') {
+      picked = next;
+      showPicked(picked.length === 1 ? 'Selected that building.' : 'Selected the buildings in the box.', true);
+      return;
+    }
+    let added = false;
+    for (const building of next) {
+      const index = picked.findIndex((item) => sameBuilding(item, building));
+      if (index >= 0) picked.splice(index, 1);
+      else {
+        picked.push(building);
+        added = true;
+      }
+    }
+    showPicked(added ? 'Added that building.' : 'Removed that building.');
   }
 
   async function runSelect(hit: { label: string; latitude: number; longitude: number; osmType: 'node' | 'way' | 'relation'; osmId: number }): Promise<void> {
@@ -292,12 +319,13 @@ try {
     map.previewPlace(hit.longitude, hit.latitude);
     try {
       const building = await loadBuilding(hit, { fetch, cache });
+      picked = [building];
       model = assembleHouse(building);
       site = { latitude: model.origin.latitude, longitude: model.origin.longitude, timeZone: null, label: hit.label };
       describeSite(`${hit.label}. Time uses a fixed offset from longitude, without daylight saving.`);
       map.setOsmRing(building.parts[0]?.outer ?? []);
       showHouse(model, { syncMap: true, fly: true, demo: false });
-      address.setMessage('');
+      address.setMessage('1 building. Click another to add it, or click this one to remove it.');
     } catch (error) {
       address.setMessage(failureText(error));
     } finally {
@@ -312,12 +340,36 @@ try {
   resize();
   window.addEventListener('resize', resize);
   showHouse(model, { syncMap: true, fly: true, demo: true });
-  panel.setStatus('Shift-drag a box on the map to load the buildings there. Click one building to load only that one.');
+  panel.setStatus('Click buildings to add or remove them. Shift-drag a box to select a whole block.');
+
+  showView = (view) => {
+    const mapMain = view === 'map';
+    panel.setView(view);
+    mapHost.classList.toggle('primary', mapMain);
+    mapHost.classList.toggle('inset', !mapMain);
+    stage.classList.toggle('primary', !mapMain);
+    stage.classList.toggle('inset', mapMain);
+    requestAnimationFrame(() => {
+      map.resize();
+      resizeRenderer(renderer, camera, canvas);
+      frameHouse(camera, controls, new Box3().setFromObject(house));
+    });
+  };
+  mapHost.addEventListener('click', () => {
+    if (mapHost.classList.contains('inset')) showView('map');
+  });
+  stage.addEventListener('click', () => {
+    if (stage.classList.contains('inset')) showView('plane');
+  });
+  showView('map');
 
   const frame = () => {
-    controls.target.copy(orbitTarget);
     controls.update();
-    compass.update(camera);
+    if (sunNow !== null) {
+      placeSunMarker(sunMarker, sunNow, sunNow.altitudeDeg, orbitTarget, camera);
+      compass.update(camera, sunNow);
+      sunBadge.update(camera, sunNow, orbitTarget, canvas.clientWidth, canvas.clientHeight);
+    }
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
   };
@@ -341,6 +393,26 @@ function formatOffset(minutes: number): string {
   const sign = minutes >= 0 ? '+' : '−';
   const absolute = Math.abs(minutes);
   return `${sign}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+}
+
+function footprintToBuilding(footprint: PickedFootprint): GeographicBuilding {
+  return {
+    id: footprint.id,
+    label: footprint.label,
+    tags: {
+      building: 'yes',
+      ...(footprint.heightM === null ? {} : { height: String(footprint.heightM) }),
+    },
+    parts: [{ outer: footprint.outer, holes: footprint.holes }],
+    provenance: { source: 'osm', confidence: 0.75, note: 'Building drawn on the map.' },
+  };
+}
+
+function sameBuilding(a: GeographicBuilding, b: GeographicBuilding): boolean {
+  if (a.id === b.id) return true;
+  const aId = a.id.split('/').pop();
+  const bId = b.id.split('/').pop();
+  return aId !== undefined && aId !== '' && aId === bId;
 }
 
 function failureText(error: unknown): string {

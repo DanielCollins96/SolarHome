@@ -12,6 +12,7 @@ export interface GeographicRing {
 }
 
 export interface GeographicBuilding {
+  id: string;
   label: string;
   tags: Record<string, string>;
   parts: GeographicRing[];
