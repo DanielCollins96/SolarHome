@@ -1,0 +1,165 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #c5d7ea;
+  color: #e7edf2;
+  font-family: system-ui, sans-serif;
+}
+
+#view {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: min(340px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 14px 16px 16px;
+  border-radius: 12px;
+  background: rgba(18, 24, 32, 0.9);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  z-index: 2;
+}
+
+#panel h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+#panel p {
+  margin: 0 0 10px;
+}
+
+.lede,
+.meta,
+.note,
+.status {
+  color: #c5d0da;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.meta {
+  margin-bottom: 12px;
+}
+
+#panel label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+#panel input[type='date'],
+#panel button {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  border-radius: 6px;
+  font: inherit;
+}
+
+#panel input[type='date'] {
+  background: #101820;
+  color: #e7edf2;
+  border: 1px solid #3d4c5c;
+  padding: 6px 8px;
+}
+
+#panel input[type='range'] {
+  width: 100%;
+  margin-top: 6px;
+}
+
+#panel button {
+  border: 0;
+  background: #d7e4f2;
+  color: #14202b;
+  padding: 8px 10px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+
+#panel button:hover {
+  background: #edf3f8;
+}
+
+#panel dl {
+  margin: 0 0 8px;
+}
+
+#panel dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+#panel dt {
+  color: #9eacb8;
+}
+
+#panel dd {
+  margin: 0;
+  text-align: right;
+}
+
+#compass {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: rgba(18, 24, 32, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.rose {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.tick {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  font-size: 13px;
+  font-weight: 650;
+  color: #d5dde6;
+}
+
+.tick.n {
+  color: #ff6b6b;
+  transform: translate(-50%, -50%) translateY(-32px);
+}
+
+.tick.e {
+  transform: translate(-50%, -50%) translateX(32px);
+}
+
+.tick.s {
+  transform: translate(-50%, -50%) translateY(32px);
+}
+
+.tick.w {
+  transform: translate(-50%, -50%) translateX(-32px);
+}
+
+#webgl-error {
+  margin: 24px;
+  color: #1c2430;
+  font: 16px/1.4 system-ui, sans-serif;
+}
