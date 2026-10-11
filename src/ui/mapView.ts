@@ -7,6 +7,7 @@ import { localToLngLat, projectToLocal, type LngLat } from '../geo/projection.ts
 import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 import type { HouseModel } from '../house/houseModel.ts';
+import { CALGARY_CREDIT } from '../geo/calgary.ts';
 import { createModelLayer } from './modelLayer.ts';
 import type { PlanPoint } from '../house/centering.ts';
 import type { TreeSpec } from '../scene/treeMesh.ts';
@@ -97,6 +98,8 @@ export function mountMap(
     zoom: 18,
     pitch: 45,
     boxZoom: false,
+    // The City of Calgary's open-data licence asks for credit where its heights and trees are used.
+    attributionControl: { customAttribution: CALGARY_CREDIT },
   });
   let vertices: LngLat[] = [];
   let footprints: LngLat[][] = [];

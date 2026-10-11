@@ -12,7 +12,10 @@ const CITY_BUILDINGS_URL = 'https://data.calgary.ca/resource/cchr-krqg.json';
 /** A box around the city limits. Outside it, the city has nothing to add. */
 const CALGARY_BOUNDS = { south: 50.84, north: 51.22, west: -114.32, east: -113.85 };
 
-/** Credited on the height note, as the city's open-data licence asks. */
+/** Shown in the map's credits, as the city's Open Government Licence asks. */
+export const CALGARY_CREDIT = 'Calgary heights and trees: <a href="https://data.calgary.ca" target="_blank" rel="noopener">City of Calgary Open Data</a>';
+
+/** Recorded on a part's tags when its height came from the city. */
 export const CALGARY_HEIGHT_SOURCE = 'City of Calgary LiDAR';
 
 interface CityBuildingRow {
