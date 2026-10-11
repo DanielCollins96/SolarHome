@@ -750,3 +750,96 @@ label.file input {
 #tree-selected[hidden] {
   display: none;
 }
+
+.places {
+  position: relative;
+}
+
+.places-row {
+  display: flex;
+  gap: 6px;
+}
+
+#panel .places-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#panel .places-row button:disabled {
+  color: #9aa4b0;
+  cursor: default;
+  background: #fff;
+}
+
+#panel .places-row #show-recent {
+  margin-left: auto;
+}
+
+#go-home svg {
+  width: 15px;
+  height: 15px;
+}
+
+#recent-list {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid #d7dde3;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+}
+
+#recent-list[hidden] {
+  display: none;
+}
+
+#recent-list li {
+  display: flex;
+  align-items: center;
+}
+
+#panel #recent-list .recent-go {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  border: 0;
+  text-align: left;
+}
+
+#recent-list .recent-go span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+#recent-list .recent-go small {
+  color: #6b7785;
+  font-size: 11px;
+}
+
+#panel #recent-list .recent-forget {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  color: #6b7785;
+  font-size: 16px;
+  line-height: 1;
+}

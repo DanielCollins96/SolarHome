@@ -100,3 +100,37 @@ function fetchSearch(url: URL, deps: GeocodeDeps): Promise<Response> {
 function isAbort(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
+
+/** A short street address for a point, such as "123 Main Street", or null when there is none nearby. */
+export async function reverseGeocode(latitude: number, longitude: number, deps: GeocodeDeps): Promise<string | null> {
+  const key = `nominatim-reverse:${latitude.toFixed(5)},${longitude.toFixed(5)}`;
+  let body = await deps.cache.get(key).catch(() => undefined);
+  if (body === undefined) {
+    const url = sameOrigin('/api/nominatim/reverse');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('lat', String(latitude));
+    url.searchParams.set('lon', String(longitude));
+    url.searchParams.set('zoom', '18');
+    const response = await fetchSearch(url, deps);
+    if (!response.ok) return null;
+    body = await response.text();
+    await deps.cache.set(key, body).catch(() => undefined);
+  }
+  return parseReverse(body);
+}
+
+function parseReverse(body: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const record = parsed as Record<string, unknown>;
+    const address = (typeof record.address === 'object' && record.address !== null ? record.address : {}) as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);
+    const street = [text(address.house_number), text(address.road)].filter((part) => part !== undefined).join(' ');
+    const name = text(record.name);
+    const area = text(address.neighbourhood) ?? text(address.suburb) ?? text(address.city) ?? text(address.town);
+    return [name ?? (street === '' ? undefined : street), area].filter((part) => part !== undefined).join(', ') || null;
+  } catch {
+    return null;
+  }
+}

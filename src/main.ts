@@ -5,7 +5,7 @@ import { demoHouseModel } from './house/demoHouse.ts';
 import { createHouseObject, partTopHeight } from './house/houseMesh.ts';
 import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
-import { GeoFailure, searchAddresses } from './geo/geocode.ts';
+import { GeoFailure, reverseGeocode, searchAddresses } from './geo/geocode.ts';
 import { inCalgary, lacksHeight, loadCalgaryCanopy, loadCalgaryTrees, type ListedTree, withCalgaryHeights } from './geo/calgary.ts';
 import { buildingContains, loadBuilding, loadBuildingsInBounds, loadWholeBuilding } from './geo/overpass.ts';
 import { localToLngLat, projectRing, projectToLocal, unprojectRing, type LngLat } from './geo/projection.ts';
@@ -13,6 +13,7 @@ import { DEMO_LOCATION } from './scene/demoLocation.ts';
 import { createGround, createGroundGrid } from './scene/groundPlane.ts';
 import { createNeighbourGroup } from './scene/neighbourMesh.ts';
 import { createNorthArrow } from './scene/northArrow.ts';
+import { createSavedPlaces, samePlace, type SavedPlace } from './scene/savedPlaces.ts';
 import { createTreeEdits, MAX_TREE_HEIGHT_M, MAX_TREE_WIDTH_M, MIN_TREE_HEIGHT_M, MIN_TREE_WIDTH_M, type PlacedTree } from './scene/treeEdits.ts';
 import { createTreeGroup, moveTreeMesh, planTrees, treeHeightOf, type TreeCrown, type TreeKind, type TreePoint } from './scene/treeMesh.ts';
 import type { PlanPoint } from './house/centering.ts';
@@ -44,6 +45,7 @@ import {
 } from './sun/sunPosition.ts';
 import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, timeZoneAt, zonedLocalToDate } from './sun/zonedTime.ts';
 import { mountAddressSearch } from './ui/addressSearch.ts';
+import { mountPlacesPanel } from './ui/placesPanel.ts';
 import { mountTreeEditor } from './ui/treeEditor.ts';
 import { mountCompass, mountSunBadge } from './ui/compass.ts';
 import { DEFAULT_CLOCK, mountControls } from './ui/controls.ts';
@@ -86,12 +88,13 @@ interface Site {
   label: string;
 }
 
-let site: Site = {
-  latitude: DEMO_LOCATION.latitude,
-  longitude: DEMO_LOCATION.longitude,
-  timeZone: DEMO_LOCATION.timeZone,
-  label: DEMO_LOCATION.name,
-};
+const places = createSavedPlaces();
+/** A saved home opens instead of the demonstration building. */
+const startHome = places.home();
+let site: Site =
+  startHome === null
+    ? { latitude: DEMO_LOCATION.latitude, longitude: DEMO_LOCATION.longitude, timeZone: DEMO_LOCATION.timeZone, label: DEMO_LOCATION.name }
+    : { ...siteAt(startHome.at), label: startHome.label };
 let model = demoHouseModel();
 let picked: GeographicBuilding[] = [];
 const knownBuildings: GeographicBuilding[] = [];
@@ -110,6 +113,11 @@ let viewRadius = 12;
 /** Half the width the sun's shadow must cover: the model, and its trees once they load. */
 let shadowRadius = 12;
 let searchToken = 0;
+/** The name the selection came with, from an address search or a saved place. Null names it from the buildings. */
+let placeLabel: string | null = null;
+/** Seconds of quiet after a change before the selection goes into the recent places. */
+const VISIT_DELAY_MS = 1_500;
+let visitTimer = 0;
 const searchAbort = { current: new AbortController() };
 
 /** Farther than this from the selection, a building or the map's centre is somewhere else entirely. */
@@ -208,6 +216,23 @@ try {
       showPicked('Selection cleared.');
     },
   });
+
+  const placesPanel = mountPlacesPanel(panel.tools, {
+    onGo: (place) => goToPlace(place),
+    onSaveHome: () => {
+      void saveHome();
+    },
+    onForgetHome: () => {
+      places.clearHome();
+      refreshPlaces();
+      address.setMessage('Home forgotten.');
+    },
+    onForget: (place) => {
+      places.forget(place.id);
+      refreshPlaces();
+    },
+  });
+  refreshPlaces();
 
   const treeEditor = mountTreeEditor(panel.tools, {
     onToggle: (editing) => {
@@ -455,6 +480,9 @@ try {
     // The dashed outline belongs to an address search, not to whatever is selected now.
     map.setOsmRing([]);
     if (picked.length === 0) {
+      placeLabel = null;
+      window.clearTimeout(visitTimer);
+      refreshPlaces();
       map.setFootprints([]);
       map.setModel(null);
       map.setNote('');
@@ -470,6 +498,7 @@ try {
     site = { ...siteAt(model.origin), label: model.label };
     describeSite(site.timeZone === null ? `${model.label}. ${FIXED_OFFSET_NOTE}` : model.label);
     showHouse(model, { syncMap: true, fly, demo: false, announce: false });
+    scheduleVisit();
     const count = picked.length === 1 ? '1 building' : `${picked.length} buildings`;
     const message = `${count}. ${note} Double-click a building here to remove it, or hover it and press Delete.`;
     address.setMessage(message);
@@ -691,6 +720,8 @@ try {
       describeSite(site.timeZone === null ? `${hit.label}. ${FIXED_OFFSET_NOTE}` : hit.label);
       map.setOsmRing(building.parts[0]?.outer ?? []);
       showHouse(model, { syncMap: true, fly: true, demo: false });
+      placeLabel = shortLabel(hit.label);
+      scheduleVisit();
       address.setClearEnabled(true);
       address.setMessage('1 building. Click another to add it, or click this one to remove it.');
     } catch (error) {
@@ -700,13 +731,80 @@ try {
     }
   }
 
+  /** The current selection as a place to save. */
+  async function currentPlace(): Promise<{ label: string; at: LngLat; buildings: GeographicBuilding[] }> {
+    const buildings = picked.slice();
+    const at = model.origin;
+    return { label: placeLabel ?? (await nameSelection(buildings, at)), at, buildings };
+  }
+
+  /** A named building keeps its name. A plain house is named by its street address. */
+  async function nameSelection(buildings: readonly GeographicBuilding[], at: LngLat): Promise<string> {
+    const named = buildings.find((building) => building.label !== 'Building');
+    if (buildings.length === 1 && named !== undefined) return named.label;
+    const street = await reverseGeocode(at.latitude, at.longitude, { fetch, cache }).catch(() => null);
+    const where = street ?? `${at.latitude.toFixed(4)}, ${at.longitude.toFixed(4)}`;
+    return buildings.length === 1 ? where : `${where} (${buildings.length} buildings)`;
+  }
+
+  function scheduleVisit(): void {
+    window.clearTimeout(visitTimer);
+    refreshPlaces();
+    visitTimer = window.setTimeout(() => {
+      void recordVisit();
+    }, VISIT_DELAY_MS);
+  }
+
+  async function recordVisit(): Promise<void> {
+    if (picked.length === 0) return;
+    const before = picked;
+    const place = await currentPlace();
+    // The selection changed during the address lookup. Its own visit is on the way.
+    if (picked !== before) return;
+    places.visit(place);
+    refreshPlaces();
+  }
+
+  async function saveHome(): Promise<void> {
+    if (picked.length === 0) return;
+    const place = await currentPlace();
+    const home = places.setHome(place);
+    placeLabel = home.label;
+    refreshPlaces();
+    address.setMessage(`Saved ${home.label} as home. It opens here next time.`);
+  }
+
+  function refreshPlaces(): void {
+    const home = places.home();
+    placesPanel.setPlaces(home, places.recent());
+    const here = { at: model.origin, buildings: picked };
+    placesPanel.setSelection(picked.length === 0 ? 'none' : home !== null && samePlace(home, here) ? 'home' : 'other');
+  }
+
+  /** Select a saved place again. Its buildings are kept, so this needs no lookup unless they were too large to store. */
+  function goToPlace(place: SavedPlace): void {
+    userSelected = true;
+    upgradeToken += 1;
+    placeLabel = place.label;
+    if (place.buildings !== undefined && place.buildings.length > 0) {
+      for (const building of place.buildings) rememberBuilding(building);
+      picked = place.buildings.slice();
+      showPicked(`Back at ${place.label}.`, true);
+      return;
+    }
+    picked = [];
+    map.flyTo(place.at.longitude, place.at.latitude);
+    void runPick(place.at);
+  }
+
   const resize = () => {
     resizeRenderer(renderer, camera, canvas);
     map.resize();
   };
   resize();
   window.addEventListener('resize', resize);
-  openingDone = selectOpeningBuilding();
+  if (startHome === null) openingDone = selectOpeningBuilding();
+  else goToPlace(startHome);
   panel.setStatus('Click buildings to add or remove them. Shift-drag a box to select a whole block.');
 
   showView = (view) => {
@@ -865,6 +963,16 @@ function describeSite(lede: string): void {
   const lat = Math.abs(site.latitude).toFixed(4);
   const lng = Math.abs(site.longitude).toFixed(4);
   panel.setSite(lede, `${lat}°${site.latitude >= 0 ? 'N' : 'S'}, ${lng}°${site.longitude >= 0 ? 'E' : 'W'} · ${zone}`);
+}
+
+/** The first two parts of a geocoder label, such as "123 Main Street, Calgary". */
+function shortLabel(label: string): string {
+  return label
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part !== '')
+    .slice(0, 2)
+    .join(', ');
 }
 
 function formatOffset(minutes: number): string {
