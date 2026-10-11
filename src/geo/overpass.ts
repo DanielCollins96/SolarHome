@@ -11,7 +11,11 @@ export interface OverpassDeps {
   fetch: typeof fetch;
   cache: LookupCache;
   signal?: AbortSignal;
+  /** Waits before each retry when Overpass is busy. The public server often answers 504 for a few seconds. */
+  retryDelaysMs?: readonly number[];
 }
+
+const RETRY_DELAYS_MS = [2_000, 5_000];
 
 interface OsmPoint {
   lat: number;
@@ -32,7 +36,11 @@ const AROUND_M = 45;
 /** Load the building for a geocoder hit. Uses the cache on a repeated lookup. */
 export async function loadBuilding(hit: GeocodeHit, deps: OverpassDeps): Promise<GeographicBuilding> {
   if (hit.osmType === 'way' || hit.osmType === 'relation') {
-    const direct = await fetchElements(elementQuery(hit.osmType, hit.osmId), `overpass:${hit.osmType}:${hit.osmId}`, deps);
+    const direct = await fetchElements(elementQuery(hit.osmType, hit.osmId), `overpass:${hit.osmType}:${hit.osmId}:parts`, deps);
+    // A search can land on the outline of a building drawn in parts, like the CN Tower.
+    // The parts are the building; the outline alone is a solid column.
+    const whole = partsBuildingIn(direct);
+    if (whole !== null) return whole;
     const building = buildingFromElements(direct, hit.label);
     if (building !== null) return building;
   }
@@ -95,14 +103,18 @@ export function chooseBuilding(
 /**
  * The building relation that contains this point, including every outline and part.
  * A single way is used when the point is not inside a building relation.
+ * `wayReachM` also fetches building ways whose outline passes within that distance, so a
+ * large building drawn as one way, like a pyramid, arrives with its height and roof tags.
  */
 export async function loadWholeBuilding(
   latitude: number,
   longitude: number,
   deps: OverpassDeps,
+  wayReachM = 0,
 ): Promise<GeographicBuilding> {
-  const key = `overpass:whole:${latitude.toFixed(5)}:${longitude.toFixed(5)}`;
-  const elements = await fetchElements(wholeBuildingQuery(latitude, longitude), key, deps);
+  const reach = Math.min(300, Math.ceil(wayReachM));
+  const key = `overpass:whole:${latitude.toFixed(5)}:${longitude.toFixed(5)}${reach > 0 ? `:${reach}` : ''}`;
+  const elements = await fetchElements(wholeBuildingQuery(latitude, longitude, reach), key, deps);
   const building = wholeBuildingFromElements(elements, latitude, longitude);
   if (building === null) {
     throw new GeoFailure('not-found', 'No building footprint was found at the starting place.');
@@ -124,7 +136,8 @@ export function wholeBuildingFromElements(
   for (const element of elements) {
     if (element.type !== 'relation' || element.tags?.type !== 'building') continue;
     const building = relationBuilding(element, ways);
-    if (building === null || !buildingContains(building, latitude, longitude)) continue;
+    const footprint = relationBuilding(element, ways, true);
+    if (building === null || footprint === null || !buildingContains(footprint, latitude, longitude)) continue;
     const area = buildingArea(building);
     if (best === null || area < best.area) best = { building, area };
   }
@@ -132,11 +145,25 @@ export function wholeBuildingFromElements(
   return chooseBuilding(elements, latitude, longitude, 'Building');
 }
 
-function relationBuilding(relation: OverpassElement, ways: Map<number, OverpassElement>): GeographicBuilding | null {
+/**
+ * The relation's parts. Its `outline` member is the 2D footprint for maps that cannot draw
+ * parts, so it is left out when parts exist (the CN Tower's would be a 553 m column), unless
+ * it is tagged as a part itself, like Toronto City Hall's podium, or `withOutline` asks for
+ * the ground footprint.
+ */
+function relationBuilding(
+  relation: OverpassElement,
+  ways: Map<number, OverpassElement>,
+  withOutline = false,
+): GeographicBuilding | null {
+  const members = relation.members ?? [];
+  const hasParts = members.some((member) => member.role === 'part');
   const parts: GeographicRing[] = [];
-  for (const member of relation.members ?? []) {
+  for (const member of members) {
     if (member.role === 'inner' || member.type !== 'way' || member.ref === undefined) continue;
     const way = ways.get(member.ref);
+    const outlineOnly = member.role === 'outline' && hasParts && !isPart(way?.tags?.['building:part']);
+    if (outlineOnly && !withOutline) continue;
     const ring = closedRing(way?.geometry ?? member.geometry);
     if (ring === null) continue;
     parts.push({ outer: ring, holes: [], tags: way?.tags ?? {} });
@@ -151,13 +178,34 @@ function relationBuilding(relation: OverpassElement, ways: Map<number, OverpassE
   };
 }
 
-function wholeBuildingQuery(latitude: number, longitude: number): string {
-  return `[out:json][timeout:25];relation["type"="building"](around:80,${latitude},${longitude});(._;>;);out geom;`;
+function isPart(value: string | undefined): boolean {
+  return value !== undefined && value !== '' && value !== 'no';
+}
+
+function wholeBuildingQuery(latitude: number, longitude: number, wayReachM: number): string {
+  const relations = `relation["type"="building"](around:80,${latitude},${longitude});(._;>;)`;
+  if (wayReachM <= 0) return `[out:json][timeout:25];${relations};out geom;`;
+  // `around` measures to a way's outline, not its interior, so the reach must cover the walls.
+  return `[out:json][timeout:25];${relations}->.whole;way["building"](around:${wayReachM},${latitude},${longitude})->.single;(.whole;.single;);out geom;`;
 }
 
 async function fetchElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
   const cached = await deps.cache.get(cacheKey);
   if (cached !== undefined) return parseElements(cached);
+  const delays = deps.retryDelaysMs ?? RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestElements(query, cacheKey, deps);
+    } catch (error) {
+      const delay = delays[attempt];
+      const busy = error instanceof GeoFailure && error.kind === 'timeout' && deps.signal?.aborted !== true;
+      if (!busy || delay === undefined) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function requestElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
   let response: Response;
   try {
     response = await sendRequest(deps.fetch, ENDPOINT, {
@@ -371,8 +419,19 @@ function boundsQuery(bounds: MapBounds): string {
   return `[out:json][timeout:25];way["building"](${box});out geom;`;
 }
 
+/** The element, plus any building relation it belongs to and that relation's member ways. */
 function elementQuery(osmType: 'way' | 'relation', osmId: number): string {
-  return `[out:json][timeout:25];${osmType}(${osmId});out geom;`;
+  return `[out:json][timeout:25];${osmType}(${osmId})->.hit;rel(b${osmType === 'way' ? 'w' : 'r'}.hit)["type"="building"]->.whole;(.hit;.whole;way(r.whole););out geom;`;
+}
+
+function partsBuildingIn(elements: OverpassElement[]): GeographicBuilding | null {
+  const relation = elements.find((element) => element.type === 'relation' && element.tags?.type === 'building');
+  if (relation === undefined) return null;
+  const ways = new Map<number, OverpassElement>();
+  for (const element of elements) {
+    if (element.type === 'way') ways.set(element.id, element);
+  }
+  return relationBuilding(relation, ways);
 }
 
 function aroundQuery(latitude: number, longitude: number): string {

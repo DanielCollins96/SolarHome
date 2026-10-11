@@ -3,6 +3,8 @@ import { distance, openRing, reverseRing, selfIntersects, signedArea } from './p
 
 const SHORT_EDGE_M = 0.3;
 const RIGHT_ANGLE_TOLERANCE_DEG = 5;
+/** Corners straighter than this are points along a wall. */
+const STRAIGHT_CORNER_DEG = 178;
 
 export interface CleanedFootprint {
   points: PlanPoint[];
@@ -21,6 +23,7 @@ export function cleanFootprint(points: readonly PlanPoint[]): CleanedFootprint {
   }
 
   ring = dropShortEdges(ring, issues);
+  ring = dropStraightCorners(ring);
   ring = snapRightAngles(ring, issues);
   if (signedArea(ring) < 0) ring = reverseRing(ring);
   if (selfIntersects(ring)) {
@@ -40,6 +43,26 @@ function dropShortEdges(points: PlanPoint[], issues: string[]): PlanPoint[] {
       break;
     }
     ring.splice(index, 1);
+  }
+  return ring;
+}
+
+/**
+ * A point partway along a straight wall is not a corner. OSM keeps them where walls share
+ * nodes, and each one stops a hip roof from closing over the whole outline.
+ */
+function dropStraightCorners(points: PlanPoint[]): PlanPoint[] {
+  const ring = points.slice();
+  for (let i = 0; i < ring.length && ring.length > 3; ) {
+    const previous = ring[(i - 1 + ring.length) % ring.length];
+    const current = ring[i];
+    const following = ring[(i + 1) % ring.length];
+    if (previous !== undefined && current !== undefined && following !== undefined &&
+      cornerDegrees(previous, current, following) > STRAIGHT_CORNER_DEG) {
+      ring.splice(i, 1);
+      continue;
+    }
+    i += 1;
   }
   return ring;
 }

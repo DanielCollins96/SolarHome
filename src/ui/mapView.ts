@@ -26,11 +26,14 @@ export interface PickedFootprint {
   outer: LngLat[];
   holes: LngLat[][];
   heightM: number | null;
+  /** Height of the underside above the ground. Tiles draw a tower's pod as a part starting in the air. */
+  baseM: number;
 }
 
 export interface MapController {
   setTrace(ring: LngLat[]): void;
-  setFootprints(rings: readonly { ring: readonly LngLat[]; heightM: number | null }[]): void;
+  /** `heightM` is the top above the ground; `baseM` lifts a part such as a tower's pod. */
+  setFootprints(rings: readonly { ring: readonly LngLat[]; heightM: number | null; baseM?: number }[]): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -67,6 +70,7 @@ export function mountMap(
   let vertices: LngLat[] = [];
   let footprints: LngLat[][] = [];
   let footprintHeights: number[] = [];
+  let footprintBases: number[] = [];
   let osmRing: LngLat[] = [];
   let tracing = false;
   let dragging: number | null = null;
@@ -133,7 +137,7 @@ export function mountMap(
         'fill-extrusion-color': '#e23d3d',
         'fill-extrusion-opacity': 0.78,
         'fill-extrusion-height': ['+', ['coalesce', ['get', 'height'], 8], 1.2],
-        'fill-extrusion-base': 0,
+        'fill-extrusion-base': ['coalesce', ['get', 'base'], 0],
       },
     });
     map.addLayer({
@@ -324,7 +328,7 @@ export function mountMap(
     const osm = map.getSource('osm');
     if (tracing) footprints = vertices.length >= 3 ? [vertices.map((point) => ({ ...point }))] : footprints;
     if (trace && 'setData' in trace) {
-      (trace as GeoJSONSource).setData(footprintCollection(footprints, tracing ? vertices : [], footprintHeights));
+      (trace as GeoJSONSource).setData(footprintCollection(footprints, tracing ? vertices : [], footprintHeights, footprintBases));
     }
     if (osm && 'setData' in osm) (osm as GeoJSONSource).setData(lineCollection(osmRing));
     if (emit) options.onTrace(vertices.map((point) => ({ ...point })));
@@ -341,6 +345,7 @@ export function mountMap(
       const kept = rings.filter((entry) => entry.ring.length >= 3);
       footprints = kept.map((entry) => entry.ring.map((point) => ({ ...point })));
       footprintHeights = kept.map((entry) => (entry.heightM !== null && entry.heightM > 0 ? entry.heightM : 8));
+      footprintBases = kept.map((entry) => entry.baseM ?? 0);
       vertices = footprints.length === 1 ? (footprints[0]?.map((point) => ({ ...point })) ?? []) : [];
       publish(false);
     },
@@ -829,26 +834,33 @@ function featureFootprints(feature: MapGeoJSONFeature): PickedFootprint[] {
   const id = feature.id !== undefined && feature.id !== null ? `way/${feature.id}` : '';
   const label = readLabel(feature.properties);
   const heightM = readHeight(feature.properties);
+  const baseM = readBase(feature.properties);
   if (feature.geometry.type === 'Polygon') {
-    const pick = footprintFromRings(id, label, feature.geometry.coordinates.map(toRing), heightM);
+    const pick = footprintFromRings(id, label, feature.geometry.coordinates.map(toRing), heightM, baseM);
     return pick === null ? [] : [pick];
   }
   if (feature.geometry.type === 'MultiPolygon') {
     // The tiles merge whole blocks into one feature, so its id names no single building.
     return feature.geometry.coordinates.flatMap((polygon) => {
       const rings = polygon.map(toRing);
-      const pick = footprintFromRings('', label, rings, heightM);
+      const pick = footprintFromRings('', label, rings, heightM, baseM);
       return pick === null ? [] : [pick];
     });
   }
   return [];
 }
 
-function footprintFromRings(id: string, label: string, rings: LngLat[][], heightM: number | null): PickedFootprint | null {
+function footprintFromRings(
+  id: string,
+  label: string,
+  rings: LngLat[][],
+  heightM: number | null,
+  baseM: number,
+): PickedFootprint | null {
   const outer = rings[0];
   if (outer === undefined || outer.length < 3) return null;
   const holes = rings.slice(1).filter((ring) => ring.length >= 3 && ringContains(outer, centroid(ring)));
-  return { id: id === '' ? ringId(outer) : id, label, outer, holes, heightM };
+  return { id: id === '' ? ringId(outer) : id, label, outer, holes, heightM, baseM };
 }
 
 function sameFootprint(a: PickedFootprint, b: PickedFootprint): boolean {
@@ -893,6 +905,12 @@ function readHeight(properties: GeoJsonProperties): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function readBase(properties: GeoJsonProperties): number {
+  const raw = properties?.render_min_height ?? properties?.min_height;
+  const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function vertexUnder(map: MapLibreMap, event: MapMouseEvent): number | null {
   if (!map.getLayer('trace-vertices')) return null;
   const hits = map.queryRenderedFeatures(event.point, { layers: ['trace-vertices'] });
@@ -926,7 +944,12 @@ function lineCollection(ring: LngLat[]): FeatureCollection {
   };
 }
 
-function footprintCollection(rings: readonly LngLat[][], vertices: readonly LngLat[], heights: readonly number[]): FeatureCollection {
+function footprintCollection(
+  rings: readonly LngLat[][],
+  vertices: readonly LngLat[],
+  heights: readonly number[],
+  bases: readonly number[],
+): FeatureCollection {
   const features: Feature[] = vertices.map((point, index) => ({
     type: 'Feature',
     properties: { vertex: index },
@@ -937,14 +960,15 @@ function footprintCollection(rings: readonly LngLat[][], vertices: readonly LngL
     const closed = [...ring, ring[0]].filter((point): point is LngLat => point !== undefined);
     const coordinates = closed.map((point) => [point.longitude, point.latitude]);
     const height = heights[index] ?? 8;
+    const base = bases[index] ?? 0;
     features.push({
       type: 'Feature',
-      properties: { height },
+      properties: { height, base },
       geometry: { type: 'LineString', coordinates },
     });
     features.push({
       type: 'Feature',
-      properties: { height },
+      properties: { height, base },
       geometry: { type: 'Polygon', coordinates: [coordinates] },
     });
   });

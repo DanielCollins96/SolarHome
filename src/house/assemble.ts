@@ -1,7 +1,7 @@
 import { polygonCentroid } from './centering.ts';
 import type { PlanPoint } from './centering.ts';
 import { cleanFootprint } from './footprintClean.ts';
-import { estimateEaveHeight } from './heightEstimate.ts';
+import { estimateBaseHeight, estimateEaveHeight, stackedHeights } from './heightEstimate.ts';
 import type { HouseModel, HousePart, Provenance } from './houseModel.ts';
 import { estimateRoof } from './roofEstimate.ts';
 import { localToLngLat, projectRing, type LngLat } from '../geo/projection.ts';
@@ -44,6 +44,7 @@ export function assembleHouse(building: GeographicBuilding): HouseModel {
     const height = estimateEaveHeight({
       osmHeight: source.height,
       osmLevels: source['building:levels'],
+      osmRoofHeight: source['roof:height'],
     });
     const footprint = shift(part.outer.points, centroid);
     const holes = part.holes.map((hole) => shift(hole.points, centroid));
@@ -54,13 +55,14 @@ export function assembleHouse(building: GeographicBuilding): HouseModel {
       sourceId: building.id,
       footprint,
       holes,
-      eaveHeightM: height.eaveHeightM,
+      ...stackedHeights(height.eaveHeightM, estimateBaseHeight(source)),
       roof: roof.roof,
     };
   });
   const height = estimateEaveHeight({
     osmHeight: (building.parts[0]?.tags ?? building.tags).height,
     osmLevels: (building.parts[0]?.tags ?? building.tags)['building:levels'],
+    osmRoofHeight: (building.parts[0]?.tags ?? building.tags)['roof:height'],
   });
 
   return {
@@ -88,6 +90,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
     points: PlanPoint[];
     holes: PlanPoint[][];
     eaveHeightM: number;
+    baseHeightM?: number;
     roof: HousePart['roof'];
     issues: string[];
     roofProvenance: Provenance;
@@ -100,6 +103,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
       const height = estimateEaveHeight({
         osmHeight: source.height,
         osmLevels: source['building:levels'],
+        osmRoofHeight: source['roof:height'],
       });
       const outer = cleanFootprint(projectRing(part.outer, anchor));
       if (outer.points.length < 3) continue;
@@ -110,7 +114,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
       drafted.push({
         points: outer.points,
         holes: holes.map((hole) => hole.points),
-        eaveHeightM: height.eaveHeightM,
+        ...stackedHeights(height.eaveHeightM, estimateBaseHeight(source)),
         roof: roof.roof,
         issues: [...outer.issues, ...holes.flatMap((hole) => hole.issues), ...roof.issues],
         roofProvenance: roof.provenance,
@@ -145,6 +149,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
       footprint: shift(part.points, centroid),
       holes: part.holes.map((hole) => shift(hole, centroid)),
       eaveHeightM: part.eaveHeightM,
+      ...(part.baseHeightM === undefined ? {} : { baseHeightM: part.baseHeightM }),
       roof: part.roof,
     })),
     provenance: {

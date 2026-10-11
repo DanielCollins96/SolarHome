@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { assembleHouse, assembleTrace } from '../src/house/assemble.ts';
 import { cleanFootprint } from '../src/house/footprintClean.ts';
 import { estimateEaveHeight, parseLengthMeters } from '../src/house/heightEstimate.ts';
-import { buildHouseGeometries } from '../src/house/houseMesh.ts';
+import { buildHouseGeometries, partTopHeight } from '../src/house/houseMesh.ts';
 import {
   exportHouseJson,
   houseFootprintArea,
@@ -43,6 +43,20 @@ describe('footprint cleanup', () => {
     ]);
     expect(cleaned.points).toHaveLength(4);
     expect(signedArea(cleaned.points)).toBeGreaterThan(0);
+  });
+
+  it('drops points partway along a straight wall', () => {
+    const cleaned = cleanFootprint([
+      { east: 0, north: 0 },
+      { east: 0, north: -1.9 },
+      { east: 0, north: -6.6 },
+      { east: 0, north: -200 },
+      { east: 210, north: -200 },
+      { east: 210, north: 10 },
+      { east: 92, north: 10 },
+      { east: 0, north: 10 },
+    ]);
+    expect(cleaned.points).toHaveLength(4);
   });
 
   it('squares a corner within 5° of a right angle', () => {
@@ -164,9 +178,50 @@ describe('house model', () => {
     expect(model.parts[0]?.roof.type).toBe('flat');
     expect(houseFootprintArea(model)).toBeCloseTo(96, 1);
   });
+
+  it('builds a pyramid from its height and roof height, not a tall box', () => {
+    const side = 230;
+    const square = [
+      { east: -side / 2, north: -side / 2 },
+      { east: side / 2, north: -side / 2 },
+      { east: side / 2, north: side / 2 },
+      { east: -side / 2, north: side / 2 },
+    ];
+    const model = assembleHouse({
+      id: 'way/4420397',
+      label: 'Great Pyramid of Giza',
+      tags: { building: 'yes', height: '138.8', 'roof:height': '138', 'roof:shape': 'pyramidal' },
+      parts: [{ outer: unprojectRing(square, { latitude: 29.9792, longitude: 31.1342 }), holes: [] }],
+      provenance: { source: 'osm', confidence: 0.8 },
+    });
+    const part = model.parts[0];
+    expect(part?.eaveHeightM).toBeCloseTo(0.8, 1);
+    expect(part?.roof.type).toBe('hip');
+    expect(part?.roof.pitchDeg).toBeGreaterThan(45);
+    expect(part === undefined ? 0 : partTopHeight(part)).toBeCloseTo(138.8, 0);
+    expect(maxY(buildHouseGeometries(model).roof)).toBeCloseTo(138.8, 0);
+  });
 });
 
 describe('roof meshes', () => {
+  it('lifts a part off the ground by its base height, like a tower pod', () => {
+    const model = assembleHouse({
+      id: 'way/2',
+      label: 'Pod',
+      tags: { 'building:part': 'yes', height: '370', min_height: '330', 'roof:shape': 'flat' },
+      parts: [{ outer: unprojectRing(rectangle, { latitude: 43.64, longitude: -79.39 }), holes: [] }],
+      provenance: { source: 'osm', confidence: 0.8 },
+    });
+    const part = model.parts[0];
+    expect(part?.baseHeightM).toBe(330);
+    expect(part?.eaveHeightM).toBeCloseTo(40, 6);
+    const built = buildHouseGeometries(model);
+    built.walls.computeBoundingBox();
+    expect(built.walls.boundingBox?.min.y).toBeCloseTo(330, 6);
+    expect(maxY(built.roof)).toBeCloseTo(370, 6);
+    expect(part === undefined ? 0 : partTopHeight(part)).toBeCloseTo(370, 6);
+  });
+
   it('rebuilds when the roof type, pitch, or eave height changes', () => {
     const gable = buildHouseGeometries(rectangleModel('gable', 30, 90));
     const flat = buildHouseGeometries(rectangleModel('flat', 0, 0));

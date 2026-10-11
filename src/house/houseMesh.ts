@@ -73,12 +73,14 @@ export interface BuiltHouse {
 class Draft {
   readonly positions: number[] = [];
   readonly normals: number[] = [];
+  /** Height of the current part's base. Parts are built from y = 0 and lifted here. */
+  baseY = 0;
 
   add(a: Vec3, b: Vec3, c: Vec3): void {
     const normal = faceNormal(a, b, c);
     if (normal === null) return;
     for (const point of [a, b, c]) {
-      this.positions.push(point.x, point.y, point.z);
+      this.positions.push(point.x, point.y + this.baseY, point.z);
       this.normals.push(normal.x, normal.y, normal.z);
     }
   }
@@ -90,7 +92,13 @@ export function buildHouseGeometries(model: HouseModel): BuiltHouse {
   const roof = new Draft();
   const floor = new Draft();
   const warnings: string[] = [];
-  for (const part of model.parts) buildPart(part, walls, roof, floor, warnings);
+  for (const part of model.parts) {
+    const base = part.baseHeightM ?? 0;
+    walls.baseY = base;
+    roof.baseY = base;
+    floor.baseY = base;
+    buildPart(part, walls, roof, floor, warnings);
+  }
   return {
     walls: draftToGeometry(walls),
     roof: draftToGeometry(roof),
@@ -116,7 +124,9 @@ export function createHouseObject(model: HouseModel): { group: Group; warnings: 
     const piece = new Group();
     piece.name = 'building';
     if (key !== '') piece.userData.buildingId = key;
-    piece.add(shadedMesh('house-floor', built.floor, FLOOR_COLOR, false));
+    // Three.js draws shadows from back faces. A raised part, like a tower's pod, faces the sun
+    // with its underside, so the floor must cast or the pod's shadow is only its rim.
+    piece.add(shadedMesh('house-floor', built.floor, FLOOR_COLOR, true));
     piece.add(shadedMesh('house-walls', built.walls, WALL_COLOR, true));
     piece.add(shadedMesh('house-roof', built.roof, ROOF_COLOR, true));
     group.add(piece);
@@ -442,6 +452,22 @@ function addHeightedCap(
     }
     draft.add(first, second, third);
   }
+}
+
+/** Height above the ground of the highest point of the roof, for drawing the part as a plain block on the map. */
+export function partTopHeight(part: HousePart): number {
+  return (part.baseHeightM ?? 0) + roofTopAboveBase(part);
+}
+
+function roofTopAboveBase(part: HousePart): number {
+  const pitch = Math.tan((part.roof.pitchDeg * Math.PI) / 180);
+  if (part.roof.type === 'flat' || pitch === 0 || part.footprint.length < 3) return part.eaveHeightM;
+  if (part.roof.type === 'hip') {
+    const inset = largestInset(part.footprint);
+    if (inset !== null) return part.eaveHeightM + inset.distance * pitch;
+  }
+  const heightAt = heightFunction(part, part.footprint);
+  return Math.max(...part.footprint.map(heightAt));
 }
 
 function heightFunction(part: HousePart, footprint: PlanPoint[]): (point: PlanPoint) => number {

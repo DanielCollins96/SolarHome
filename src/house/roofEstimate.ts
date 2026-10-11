@@ -1,6 +1,7 @@
-import type { PlanPoint } from './centering.ts';
+import { polygonCentroid, type PlanPoint } from './centering.ts';
+import { parseLengthMeters } from './heightEstimate.ts';
 import type { Provenance, RoofSpec, RoofType } from './houseModel.ts';
-import { distance } from './planGeometry.ts';
+import { distance, largestInset } from './planGeometry.ts';
 
 export interface RoofEstimate {
   roof: RoofSpec;
@@ -19,10 +20,17 @@ const DEFAULT_PITCH_DEG = 25;
 export function estimateRoof(tags: Record<string, string>, footprint: readonly PlanPoint[]): RoofEstimate {
   const issues: string[] = [];
   const shape = tags['roof:shape']?.trim().toLowerCase();
-  const type = roofTypeFromShape(shape);
-  const pitch = pitchFromTags(tags, type);
+  // A building part without a roof shape is flat, by the OSM 3D convention. Parts stack, like
+  // a tower's shaft under its pod, so a guessed gable would poke up between them.
+  // Towers get the same treatment: a house gable across a round top makes no sense.
+  const part = tags['building:part'];
+  const isPart = part !== undefined && part !== '' && part !== 'no';
+  const isTower = tags.man_made === 'tower' || tags['building:shape'] === 'tower' || tags.building === 'tower';
+  const untaggedPart = (shape === undefined || shape === '') && (isPart || isTower);
+  const type = untaggedPart ? 'flat' : roofTypeFromShape(shape);
   const overhang = 0;
   const direction = directionFromTags(tags, footprint, type, issues);
+  const pitch = pitchFromTags(tags, type, footprint, direction.degrees);
   const knownShape = type !== null;
   const resolved: RoofType = type ?? 'gable';
   if (shape !== undefined && !knownShape) {
@@ -37,8 +45,12 @@ export function estimateRoof(tags: Record<string, string>, footprint: readonly P
     },
     provenance: {
       source: knownShape || pitch.source === 'osm' || direction.source === 'osm' ? 'osm' : 'default',
-      confidence: knownShape ? 0.75 : 0.3,
-      note: knownShape ? undefined : 'No roof shape tag. Using a 25° gable along the longest wall.',
+      confidence: untaggedPart ? 0.5 : knownShape ? 0.75 : 0.3,
+      note: untaggedPart
+        ? 'Building part or tower with no roof shape tag. Flat, as OSM 3D buildings assume.'
+        : knownShape
+          ? undefined
+          : 'No roof shape tag. Using a 25° gable along the longest wall.',
     },
     issues,
   };
@@ -53,14 +65,41 @@ function roofTypeFromShape(shape: string | undefined): RoofType | null {
   return null;
 }
 
-function pitchFromTags(tags: Record<string, string>, type: RoofType | null): { degrees: number; source: 'osm' | 'default' } {
+function pitchFromTags(
+  tags: Record<string, string>,
+  type: RoofType | null,
+  footprint: readonly PlanPoint[],
+  directionDeg: number,
+): { degrees: number; source: 'osm' | 'default' } {
   if (type === 'flat') return { degrees: 0, source: 'osm' };
   const raw = tags['roof:angle'];
   if (raw !== undefined && /^\d+(?:\.\d+)?$/.test(raw.trim())) {
     const degrees = Number(raw);
     if (degrees >= 0 && degrees < 89) return { degrees, source: 'osm' };
   }
+  // A roof height fixes the slope once we know how far the roof runs from eave to peak.
+  const rise = parseLengthMeters(tags['roof:height']);
+  const run = rise === undefined ? 0 : roofRun(type ?? 'gable', footprint, directionDeg);
+  if (rise !== undefined && run > 0) {
+    return { degrees: Math.min(88, (Math.atan(rise / run) * 180) / Math.PI), source: 'osm' };
+  }
   return { degrees: DEFAULT_PITCH_DEG, source: 'default' };
+}
+
+/** Horizontal distance from eave to peak, measured the way the roof mesh is built. */
+function roofRun(type: RoofType, footprint: readonly PlanPoint[], directionDeg: number): number {
+  if (type === 'hip') return largestInset(footprint)?.distance ?? 0;
+  const radians = (directionDeg * Math.PI) / 180;
+  const along = { east: Math.sin(radians), north: Math.cos(radians) };
+  if (type === 'shed') {
+    const reach = footprint.map((point) => point.east * along.east + point.north * along.north);
+    return Math.max(...reach) - Math.min(...reach);
+  }
+  // Gable: from the ridge through the centroid out to the farthest eave.
+  const center = polygonCentroid([...footprint]);
+  return Math.max(
+    ...footprint.map((point) => Math.abs((point.east - center.east) * -along.north + (point.north - center.north) * along.east)),
+  );
 }
 
 function directionFromTags(

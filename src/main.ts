@@ -2,7 +2,7 @@ import './style.css';
 import { Box3, Group, Line, Mesh, MeshLambertMaterial, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
 import { assembleBuildings, assembleHouse, assembleTrace, type GeographicBuilding } from './house/assemble.ts';
 import { demoHouseModel } from './house/demoHouse.ts';
-import { createHouseObject } from './house/houseMesh.ts';
+import { createHouseObject, partTopHeight } from './house/houseMesh.ts';
 import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
 import { GeoFailure, searchAddresses } from './geo/geocode.ts';
@@ -230,7 +230,8 @@ try {
       map.setFootprints(
         next.parts.map((part) => ({
           ring: unprojectRing(part.footprint, next.origin),
-          heightM: part.eaveHeightM,
+          heightM: partTopHeight(part),
+          baseM: part.baseHeightM ?? 0,
         })),
       );
     }
@@ -293,7 +294,7 @@ try {
   async function upgradeSelection(placeholder: GeographicBuilding, token: number): Promise<void> {
     const center = ringCentroid(placeholder.parts[0]?.outer ?? []);
     try {
-      const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache });
+      const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache }, reachFrom(placeholder, center) + 5);
       if (token !== upgradeToken || !buildingContains(whole, center.latitude, center.longitude)) return;
       if (!picked.some((item) => sameBuilding(item, placeholder))) return;
       if (footprintReach(whole) > footprintReach(placeholder) * 6) return;
@@ -301,8 +302,16 @@ try {
       picked = picked.filter((item) => !sameBuilding(item, placeholder) && !coveredBy(whole, item));
       picked.push(whole);
       showPicked('Selected that building.');
-    } catch {
-      // The map outline is already selected. A busy lookup must not wipe it.
+    } catch (error) {
+      // The map outline is already selected. A busy lookup must not wipe it, but say why the shape is plain.
+      if (token !== upgradeToken || !picked.some((item) => sameBuilding(item, placeholder))) return;
+      // Not found just means the map outline is the best there is.
+      if (error instanceof GeoFailure && error.kind === 'not-found') return;
+      const reason = failureText(error);
+      if (reason === '') return;
+      const note = `${reason} The map's plain outline is shown, without the roof shape from OpenStreetMap.`;
+      address.setMessage(note);
+      map.setNote(note);
     }
   }
 
@@ -590,7 +599,7 @@ function footprintReach(building: GeographicBuilding): number {
 
 function partsToBuilding(parts: PickedFootprint[]): GeographicBuilding {
   const outline = parts[0];
-  if (outline === undefined) return footprintToBuilding({ id: 'building/empty', label: 'Building', outer: [], holes: [], heightM: null });
+  if (outline === undefined) return footprintToBuilding({ id: 'building/empty', label: 'Building', outer: [], holes: [], heightM: null, baseM: 0 });
   const named = parts.find((part) => part.label !== 'Building');
   return {
     id: outline.id,
@@ -599,7 +608,7 @@ function partsToBuilding(parts: PickedFootprint[]): GeographicBuilding {
     parts: parts.map((part) => ({
       outer: part.outer,
       holes: part.holes,
-      tags: part.heightM === null ? undefined : { height: String(part.heightM) },
+      tags: tileTags(part),
     })),
     provenance: { source: 'osm', confidence: 0.75, note: 'Building drawn on the map.' },
   };
@@ -609,18 +618,35 @@ function footprintToBuilding(footprint: PickedFootprint): GeographicBuilding {
   return {
     id: footprint.id,
     label: footprint.label,
-    tags: {
-      building: 'yes',
-      ...(footprint.heightM === null ? {} : { height: String(footprint.heightM) }),
-    },
+    tags: { building: 'yes', ...tileTags(footprint) },
     parts: [{ outer: footprint.outer, holes: footprint.holes }],
     provenance: { source: 'osm', confidence: 0.75, note: 'Building drawn on the map.' },
+  };
+}
+
+/** OSM-style tags from a map tile outline. One that starts in the air is a building part, flat unless tagged otherwise. */
+function tileTags(footprint: PickedFootprint): Record<string, string> {
+  return {
+    ...(footprint.heightM === null ? {} : { height: String(footprint.heightM) }),
+    ...(footprint.baseM > 0 ? { min_height: String(footprint.baseM), 'building:part': 'yes' } : {}),
   };
 }
 
 function rememberBuilding(building: GeographicBuilding): void {
   if (knownBuildings.some((item) => item.id === building.id)) return;
   knownBuildings.push(building);
+}
+
+/** Farthest corner of the building from a point inside it. */
+function reachFrom(building: GeographicBuilding, center: { latitude: number; longitude: number }): number {
+  let reach = 0;
+  for (const part of building.parts) {
+    for (const point of part.outer) {
+      const local = projectToLocal(point, center);
+      reach = Math.max(reach, Math.hypot(local.east, local.north));
+    }
+  }
+  return reach;
 }
 
 function knownBuildingIn(parts: readonly PickedFootprint[]): GeographicBuilding | undefined {

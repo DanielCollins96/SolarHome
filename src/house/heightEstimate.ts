@@ -5,6 +5,8 @@ export interface HeightInput {
   lidarMeters?: number;
   /** Raw OSM `height` tag, for example "12", "12 m", or "40 ft". */
   osmHeight?: string;
+  /** Raw OSM `roof:height`. The OSM `height` tag runs to the top of the roof, so this comes off it. */
+  osmRoofHeight?: string;
   /** Raw OSM `building:levels` tag. */
   osmLevels?: string;
   shadowMeters?: number;
@@ -35,6 +37,18 @@ export function estimateEaveHeight(input: HeightInput): HeightEstimate {
     };
   }
   const osmHeight = parseLengthMeters(input.osmHeight);
+  const osmRoofHeight = parseLengthMeters(input.osmRoofHeight);
+  if (osmHeight !== undefined && osmRoofHeight !== undefined && osmRoofHeight <= osmHeight) {
+    return {
+      // A pyramid can be all roof. Keep a sliver of wall so the model stays valid.
+      eaveHeightM: Math.max(osmHeight - osmRoofHeight, 0.1),
+      provenance: {
+        source: 'osm',
+        confidence: 0.75,
+        note: 'OpenStreetMap height less the roof height.',
+      },
+    };
+  }
   if (osmHeight !== undefined) {
     return {
       eaveHeightM: osmHeight,
@@ -66,6 +80,23 @@ export function estimateEaveHeight(input: HeightInput): HeightEstimate {
     eaveHeightM: DEFAULT_EAVE_M,
     provenance: { source: 'default', confidence: 0.2, note: 'No height tag. Using 6 m.' },
   };
+}
+
+/**
+ * Height of a part's underside above the ground: OSM `min_height`, else `building:min_level` × 3 m.
+ * A tower's pod or a bridge between buildings starts in the air.
+ */
+export function estimateBaseHeight(tags: Record<string, string>): number {
+  const minHeight = parseLengthMeters(tags.min_height);
+  if (minHeight !== undefined) return minHeight;
+  const minLevel = parseLevels(tags['building:min_level']);
+  return minLevel === undefined ? 0 : minLevel * METERS_PER_LEVEL;
+}
+
+/** The part's height split into a base off the ground and walls above it. Walls keep a sliver so the part stays valid. */
+export function stackedHeights(eaveAboveGroundM: number, baseM: number): { eaveHeightM: number; baseHeightM?: number } {
+  if (baseM <= 0) return { eaveHeightM: eaveAboveGroundM };
+  return { eaveHeightM: Math.max(eaveAboveGroundM - baseM, 0.1), baseHeightM: baseM };
 }
 
 /** Parse an OSM length. Feet are converted with 0.3048 m/ft. Unknown units are rejected. */

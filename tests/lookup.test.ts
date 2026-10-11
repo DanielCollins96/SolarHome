@@ -134,8 +134,8 @@ describe('building lookup', () => {
             { type: 'way', ref: 2, role: 'part' },
           ],
         },
-        { type: 'way', id: 1, tags: { building: 'yes', height: '8' }, geometry: podium },
-        { type: 'way', id: 2, tags: { building: 'yes', height: '70' }, geometry: tower },
+        { type: 'way', id: 1, tags: { building: 'civic', 'building:part': 'yes', height: '8' }, geometry: podium },
+        { type: 'way', id: 2, tags: { 'building:part': 'office', height: '70', min_height: '8' }, geometry: tower },
       ],
       43.6536,
       -79.384,
@@ -147,12 +147,79 @@ describe('building lookup', () => {
     expect(building?.parts[1]?.tags?.height).toBe('70');
   });
 
-  it('treats a busy Overpass response as a timeout', async () => {
-    const fetchImpl: typeof fetch = async () => new Response('busy', { status: 504 });
+  it('turns a search hit on an outline into its building of parts', async () => {
+    const base = ring(43.6424, -79.3873, 0.0004, 0.0005);
+    const shaft = ring(43.6425, -79.3871, 0.0001, 0.0001);
+    const elements = [
+      { type: 'way', id: 1, tags: { building: 'yes', 'building:part': 'no', height: '553', name: 'CN Tower' }, geometry: base },
+      {
+        type: 'relation',
+        id: 14629176,
+        tags: { type: 'building', name: 'CN Tower' },
+        members: [
+          { type: 'way', ref: 1, role: 'outline' },
+          { type: 'way', ref: 2, role: 'part' },
+        ],
+      },
+      { type: 'way', id: 2, tags: { 'building:part': 'yes', height: '440' }, geometry: shaft },
+    ];
+    const fetchImpl: typeof fetch = async () => new Response(JSON.stringify({ elements }), { status: 200 });
+    const hit = { label: 'CN Tower', latitude: 43.6425, longitude: -79.387, osmType: 'way' as const, osmId: 1 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.id).toBe('relation/14629176');
+    expect(building.parts).toHaveLength(1);
+    expect(building.parts[0]?.tags?.height).toBe('440');
+  });
+
+  it('leaves out an outline that only stands in for the parts', () => {
+    const base = ring(43.6424, -79.3873, 0.0004, 0.0005);
+    const shaft = ring(43.6425, -79.3871, 0.0001, 0.0001);
+    const building = wholeBuildingFromElements(
+      [
+        {
+          type: 'relation',
+          id: 14629176,
+          tags: { type: 'building', name: 'CN Tower' },
+          members: [
+            { type: 'way', ref: 1, role: 'outline' },
+            { type: 'way', ref: 2, role: 'part' },
+          ],
+        },
+        { type: 'way', id: 1, tags: { building: 'yes', 'building:part': 'no', height: '553' }, geometry: base },
+        { type: 'way', id: 2, tags: { 'building:part': 'yes', height: '440' }, geometry: shaft },
+      ],
+      // On the base but outside the shaft: the outline still decides which building was clicked.
+      43.64242,
+      -79.38728,
+    );
+    expect(building?.id).toBe('relation/14629176');
+    expect(building?.parts).toHaveLength(1);
+    expect(building?.parts[0]?.tags?.height).toBe('440');
+  });
+
+  it('retries a busy Overpass response, then reports a timeout', async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response('busy', { status: 504 });
+    };
     const hit = { label: 'Busy', latitude: 1, longitude: 2, osmType: 'way' as const, osmId: 4 };
-    await expect(loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache() })).rejects.toMatchObject({
-      kind: 'timeout',
-    });
+    const deps = { fetch: fetchImpl, cache: createLookupCache(), retryDelaysMs: [0, 0] };
+    await expect(loadBuilding(hit, deps)).rejects.toMatchObject({ kind: 'timeout' });
+    expect(calls).toBe(3);
+  });
+
+  it('succeeds when Overpass answers after a busy response', async () => {
+    let calls = 0;
+    const way = { type: 'way', id: 4, tags: { building: 'yes' }, geometry: ring(1, 2, 0.0001, 0.0001) };
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      if (calls === 1) return new Response('busy', { status: 504 });
+      return new Response(JSON.stringify({ elements: [way] }), { status: 200 });
+    };
+    const hit = { label: 'Busy', latitude: 1, longitude: 2, osmType: 'way' as const, osmId: 4 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache(), retryDelaysMs: [0] });
+    expect(building.id).toBe('way/4');
   });
 });
 

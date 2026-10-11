@@ -32,7 +32,10 @@ export interface HousePart {
   footprint: PlanPoint[];
   /** Holes are counter-clockwise, same convention as the outer ring. */
   holes: PlanPoint[][];
+  /** Wall height above the part's base, not above the ground. */
   eaveHeightM: number;
+  /** Height of the part's underside above the ground, for a pod or a tower top. Absent means it stands on the ground. */
+  baseHeightM?: number;
   roof: RoofSpec;
   /** Geographic building this part belongs to, when several buildings share one model. */
   sourceId?: string;
@@ -152,6 +155,7 @@ function coercePart(value: unknown, index: number): HousePart {
     footprint,
     holes,
     eaveHeightM: value.eaveHeightM,
+    ...(isFiniteNumber(value.baseHeightM) && value.baseHeightM > 0 ? { baseHeightM: value.baseHeightM } : {}),
     roof: coerceRoof(value.roof),
   };
 }
