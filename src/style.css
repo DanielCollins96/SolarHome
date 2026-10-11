@@ -48,12 +48,14 @@ body {
 #map.inset .maplibregl-canvas,
 #stage.inset canvas,
 #map.inset #recenter,
+#map.inset #map-compass,
 #map.inset #map-help,
 #stage.inset #compass {
   pointer-events: none;
 }
 
 #map.inset #recenter,
+#map.inset #map-compass,
 #map.inset #map-help,
 #stage.inset #compass {
   display: none;
@@ -83,6 +85,57 @@ body {
   margin: 0 0 6px;
 }
 
+#map-help:not(.closed) #map-summary {
+  padding-right: 18px;
+}
+
+#map-help-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e7edf2;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#map-help-close:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+#map-help-open {
+  display: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #e7edf2;
+  font: italic 700 16px Georgia, 'Times New Roman', serif;
+  cursor: pointer;
+}
+
+#map-help.closed {
+  width: auto;
+  padding: 0;
+  border-radius: 50%;
+}
+
+#map-help.closed > :not(#map-help-open) {
+  display: none;
+}
+
+#map-help.closed #map-help-open {
+  display: block;
+}
+
 #map-note:empty {
   display: none;
 }
@@ -100,7 +153,8 @@ body {
   padding-left: 16px;
 }
 
-#recenter {
+#recenter,
+#map-compass {
   position: absolute;
   z-index: 3;
   right: 24px;
@@ -117,14 +171,20 @@ body {
   cursor: pointer;
 }
 
-#recenter svg {
+#map-compass {
+  bottom: 256px;
+}
+
+#recenter svg,
+#map-compass svg {
   display: block;
   width: 24px;
   height: 24px;
   margin: 10px;
 }
 
-#recenter:hover {
+#recenter:hover,
+#map-compass:hover {
   background: #f8f9fa;
 }
 

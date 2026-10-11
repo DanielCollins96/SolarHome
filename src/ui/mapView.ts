@@ -109,6 +109,31 @@ export function mountMap(
   recenter.addEventListener('click', returnToSelection);
   container.append(recenter);
 
+  // The needle turns with the map. A click turns the map back to north up.
+  const compass = document.createElement('button');
+  compass.id = 'map-compass';
+  compass.type = 'button';
+  compass.title = 'Face north';
+  compass.setAttribute('aria-label', 'Face north');
+  compass.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2.5 15.5 12h-7z" fill="#d93025"></path>
+      <path d="M12 21.5 8.5 12h7z" fill="#9aa0a6"></path>
+    </svg>
+  `;
+  const needle = compass.querySelector<SVGElement>('svg');
+  const turnNeedle = () => {
+    if (needle !== null) needle.style.transform = `rotate(${-map.getBearing()}deg)`;
+  };
+  map.on('rotate', turnNeedle);
+  turnNeedle();
+  compass.addEventListener('mousedown', (event) => event.stopPropagation());
+  compass.addEventListener('click', (event) => {
+    event.stopPropagation();
+    map.easeTo({ bearing: 0 });
+  });
+  container.append(compass);
+
   const basemap = hideBasemapUnderSelection(map, () => footprints, () => Math.max(0, ...footprintHeights));
   const modelLayer = createModelLayer('selection-model');
   let modelShown = false;
@@ -560,6 +585,8 @@ function featuresUnder(
   return found;
 }
 
+const HELP_CLOSED_KEY = 'solarhome.mapHelpClosed';
+
 function mountMapHelp(container: HTMLElement): {
   setStatus: (buildingCount: number, cornerCount: number, tracing: boolean) => void;
   setNote: (note: string) => void;
@@ -567,6 +594,8 @@ function mountMapHelp(container: HTMLElement): {
   const help = document.createElement('section');
   help.id = 'map-help';
   help.innerHTML = `
+    <button id="map-help-open" type="button" aria-label="Show map help" title="Map help">i</button>
+    <button id="map-help-close" type="button" aria-label="Hide map help" title="Hide">×</button>
     <p id="map-summary"></p>
     <p id="map-note"></p>
     <details>
@@ -580,6 +609,25 @@ function mountMapHelp(container: HTMLElement): {
     </details>
   `;
   container.append(help);
+  // Closed, the panel shrinks to an info button. The choice is remembered in this browser.
+  const setClosed = (closed: boolean) => {
+    help.classList.toggle('closed', closed);
+    try {
+      localStorage.setItem(HELP_CLOSED_KEY, closed ? '1' : '0');
+    } catch {
+      // Storage blocked. The panel still opens and closes for this visit.
+    }
+  };
+  // Starts as the info button unless this browser opened the panel last time.
+  let startClosed = true;
+  try {
+    startClosed = localStorage.getItem(HELP_CLOSED_KEY) !== '0';
+  } catch {
+    // Storage blocked. Start closed.
+  }
+  help.classList.toggle('closed', startClosed);
+  help.querySelector('#map-help-close')?.addEventListener('click', () => setClosed(true));
+  help.querySelector('#map-help-open')?.addEventListener('click', () => setClosed(false));
   const summary = help.querySelector<HTMLElement>('#map-summary');
   const note = help.querySelector<HTMLElement>('#map-note');
   return {
