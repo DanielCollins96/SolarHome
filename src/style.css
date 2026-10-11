@@ -670,3 +670,82 @@ label.file input {
   color: #1c2430;
   font: 16px/1.4 system-ui, sans-serif;
 }
+
+.tree-editor {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.tree-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#panel #tree-edit[aria-pressed='true'] {
+  background: #1a73e8;
+  border-color: #1a73e8;
+  color: #fff;
+}
+
+#tree-body {
+  display: grid;
+  gap: 6px;
+}
+
+#tree-body .note {
+  margin: 0;
+}
+
+#tree-selected {
+  display: grid;
+  gap: 6px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.tree-row > span:first-child {
+  width: 3.6em;
+  color: #5b6573;
+}
+
+#panel .tree-row select {
+  flex: 1;
+  width: auto;
+  padding: 5px 8px;
+}
+
+#panel .tree-row #tree-narrower,
+#panel .tree-row #tree-wider,
+#panel .tree-row #tree-shorter,
+#panel .tree-row #tree-taller {
+  width: 32px;
+  padding: 5px 0;
+}
+
+.tree-value {
+  min-width: 3.6em;
+  text-align: center;
+}
+
+#panel #tree-remove {
+  margin-left: auto;
+  color: #b3261e;
+}
+
+#panel #tree-reset {
+  justify-self: start;
+  font-size: 13px;
+}
+
+/* The grid layouts above would otherwise show these while they are hidden. */
+#tree-body[hidden],
+#tree-selected[hidden] {
+  display: none;
+}

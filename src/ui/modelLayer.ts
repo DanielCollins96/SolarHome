@@ -8,8 +8,11 @@ import {
   Matrix4,
   Mesh,
   MeshLambertMaterial,
+  Object3D,
   PCFShadowMap,
+  Plane,
   PlaneGeometry,
+  Raycaster,
   Scene,
   ShadowMaterial,
   Sphere,
@@ -18,7 +21,11 @@ import {
   type Material,
 } from 'three';
 import { createHouseObject } from '../house/houseMesh.ts';
+import type { PlanPoint } from '../house/centering.ts';
 import type { HouseModel } from '../house/houseModel.ts';
+import { createBlockGroup } from '../scene/blockMesh.ts';
+import { createTreeGroup, moveTreeMesh, type TreeSpec } from '../scene/treeMesh.ts';
+import { projectToLocal, type LngLat } from '../geo/projection.ts';
 import type { SunDirection } from '../sun/sunPosition.ts';
 
 const WALL_RED = 0xd9534f;
@@ -43,18 +50,34 @@ export function createModelLayer(id: string): {
   layer: CustomLayerInterface;
   setModel: (model: HouseModel | null) => void;
   setSun: (sun: SunDirection) => void;
+  /** Trees around the model, in its metres. They shade it and the ground. */
+  setTrees: (trees: readonly TreeSpec[], selectedId: string | null) => void;
+  /** Basemap buildings near the model, redrawn here so they take and cast shadows. */
+  setNeighbours: (blocks: readonly { ring: readonly LngLat[]; heightM: number; baseM: number }[]) => void;
+  /** Move one drawn tree while it is dragged. */
+  moveTree: (id: string, at: PlanPoint) => void;
+  /** The tree under a point on the map canvas, and where that point meets the ground, in model metres. */
+  pick: (x: number, y: number) => { treeId: string | null; ground: PlanPoint | null };
 } {
   const scene = new Scene();
   const camera = new Camera();
   const holder = new Group();
   scene.add(holder);
+  const trees = new Group();
+  scene.add(trees);
+  const neighbours = new Group();
+  scene.add(neighbours);
+  let origin: LngLat | null = null;
+  let neighbourBlocks: readonly { ring: readonly LngLat[]; heightM: number; baseM: number }[] = [];
   const fill = new AmbientLight(0xffffff, FILL_LIGHT);
   scene.add(fill);
   const sun = new DirectionalLight(0xffffff, SUN_LIGHT);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.bias = -0.0004;
-  sun.shadow.normalBias = 0.02;
+  // The shadow now spans the trees and neighbours, so a texel is a few centimetres or more.
+  // A larger offset keeps flat roofs from speckling with their own shadow.
+  sun.shadow.normalBias = 0.12;
   scene.add(sun);
   scene.add(sun.target);
   // Shows only the shadow that falls on it, so the map stays visible underneath.
@@ -63,6 +86,8 @@ export function createModelLayer(id: string): {
   ground.receiveShadow = true;
   scene.add(ground);
 
+  const raycaster = new Raycaster();
+  let canvasSize: { width: number; height: number } | null = null;
   let renderer: WebGLRenderer | null = null;
   let repaint: () => void = () => {};
   let placement = new Matrix4();
@@ -72,6 +97,24 @@ export function createModelLayer(id: string): {
   // Sun from the south-west until the clock sets it.
   let towardSun = new Vector3(-0.5, 1, 0.6).normalize();
   let sunUp = true;
+
+  /** The neighbours in the current model's metres. They move with it when a new model arrives. */
+  const drawNeighbours = () => {
+    clear(neighbours);
+    if (origin === null || neighbourBlocks.length === 0) return;
+    const from = origin;
+    neighbours.add(createBlockGroup(neighbourBlocks.map((block) => ({ ...block, ring: block.ring.map((point) => projectToLocal(point, from)) }))));
+  };
+
+  // The shadow covers the model, its trees and its neighbours together.
+  const fitBounds = () => {
+    const box = new Box3().setFromObject(holder).union(new Box3().setFromObject(trees)).union(new Box3().setFromObject(neighbours));
+    if (!box.isEmpty()) {
+      bounds = box.getBoundingSphere(new Sphere());
+      height = Math.max(box.max.y, 0);
+    }
+    placeSun();
+  };
 
   // Fit the light's shadow camera around the model, and the ground sheet around the longest shadow.
   const placeSun = () => {
@@ -122,6 +165,8 @@ export function createModelLayer(id: string): {
       if (renderer === null || !visible) return;
       const projection = new Matrix4().fromArray(options.defaultProjectionData.mainMatrix as ArrayLike<number> as number[]);
       camera.projectionMatrix = projection.multiply(placement);
+      const canvas = renderer.domElement;
+      canvasSize = { width: canvas.clientWidth, height: canvas.clientHeight };
       renderer.resetState();
       // The shadow pass draws into its own target, then restores this viewport. Keep it the map's size.
       renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -139,11 +184,48 @@ export function createModelLayer(id: string): {
         paintRed(built);
         holder.add(built);
         placement = placementMatrix(model.origin.longitude, model.origin.latitude);
-        const box = new Box3().setFromObject(built);
-        bounds = box.getBoundingSphere(new Sphere());
-        height = Math.max(box.max.y, 0);
+        origin = model.origin;
+        drawNeighbours();
       }
-      placeSun();
+      // Trees belong to the previous model's frame until the new ones arrive.
+      clear(trees);
+      fitBounds();
+    },
+    setTrees(next, selectedId) {
+      clear(trees);
+      if (next.length > 0) trees.add(createTreeGroup(next, selectedId));
+      fitBounds();
+    },
+    setNeighbours(blocks) {
+      neighbourBlocks = blocks;
+      drawNeighbours();
+      fitBounds();
+    },
+    moveTree(id, at) {
+      moveTreeMesh(trees, id, at);
+      if (renderer !== null) renderer.shadowMap.needsUpdate = true;
+      repaint();
+    },
+    pick(x, y) {
+      if (canvasSize === null || !visible) return { treeId: null, ground: null };
+      // From canvas pixels to clip space, then back through the camera into model metres.
+      const ndcX = (x / canvasSize.width) * 2 - 1;
+      const ndcY = 1 - (y / canvasSize.height) * 2;
+      const inverse = camera.projectionMatrix.clone().invert();
+      const near = new Vector3(ndcX, ndcY, -1).applyMatrix4(inverse);
+      const far = new Vector3(ndcX, ndcY, 1).applyMatrix4(inverse);
+      raycaster.set(near, far.sub(near).normalize());
+      let treeId: string | null = null;
+      for (const hit of raycaster.intersectObject(trees, true)) {
+        let node: Object3D | null = hit.object;
+        while (node !== null && typeof node.userData.treeId !== 'string') node = node.parent;
+        if (node !== null) {
+          treeId = node.userData.treeId as string;
+          break;
+        }
+      }
+      const onGround = raycaster.ray.intersectPlane(new Plane(new Vector3(0, 1, 0), 0), new Vector3());
+      return { treeId, ground: onGround === null ? null : { east: onGround.x, north: -onGround.z } };
     },
     setSun(next) {
       towardSun = new Vector3(next.x, next.y, next.z).normalize();

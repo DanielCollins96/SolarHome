@@ -8,6 +8,8 @@ import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 import type { HouseModel } from '../house/houseModel.ts';
 import { createModelLayer } from './modelLayer.ts';
+import type { PlanPoint } from '../house/centering.ts';
+import type { TreeSpec } from '../scene/treeMesh.ts';
 import type { SunDirection } from '../sun/sunPosition.ts';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
@@ -43,6 +45,10 @@ export interface MapController {
   setModel(model: HouseModel | null): void;
   /** Point the model's light at the sun, so its shadow on the map matches the 3D view. */
   setSun(sun: SunDirection): void;
+  /** Trees around the selection, in the model's metres. The selected one stands on a ring. */
+  setTrees(trees: readonly TreeSpec[], selectedId: string | null): void;
+  /** Move one drawn tree while it is dragged, in the model's metres. */
+  moveTree(id: string, at: PlanPoint): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -67,6 +73,21 @@ export function mountMap(
     onBuildings: (buildings: PickedFootprint[][]) => void;
     /** The person moved the map. Moves the app makes itself, like flying to a result, are not reported. */
     onMove: (center: LngLat) => void;
+    /**
+     * A plain click, before it selects a building. Return true to take it, as editing trees does.
+     * `treeId` is the drawn tree under the cursor; `ground` is where the click meets the ground,
+     * in the model's metres.
+     */
+    onPlainClick?: (hit: { treeId: string | null; ground: PlanPoint | null }) => boolean;
+    /**
+     * Dragging a drawn tree. `start` returns true to take the press instead of panning the map;
+     * `move` gets where the cursor meets the ground, in the model's metres.
+     */
+    treeDrag?: {
+      start: (hit: { treeId: string | null; ground: PlanPoint | null }) => boolean;
+      move: (ground: PlanPoint) => void;
+      end: (moved: boolean) => void;
+    };
   },
 ): MapController {
   const map = new MapLibreMap({
@@ -88,6 +109,7 @@ export function mountMap(
   let boxStart: { x: number; y: number } | null = null;
   let boxPath: LngLat[] = [];
   let press: { x: number; y: number; moved: boolean } | null = null;
+  let draggingTree = false;
   const help = mountMapHelp(container);
   const recenter = document.createElement('button');
   recenter.id = 'recenter';
@@ -134,7 +156,13 @@ export function mountMap(
   });
   container.append(compass);
 
-  const basemap = hideBasemapUnderSelection(map, () => footprints, () => Math.max(0, ...footprintHeights));
+  const basemap = hideBasemapUnderSelection(
+    map,
+    () => footprints,
+    () => Math.max(0, ...footprintHeights),
+    () => (modelShown && footprintSpanM(footprints) <= MAX_NEIGHBOUR_SPAN_M ? NEIGHBOUR_REACH_M : 0),
+    (blocks) => modelLayer.setNeighbours(blocks),
+  );
   const modelLayer = createModelLayer('selection-model');
   let modelShown = false;
   // The flat-topped red blocks stand in for a model only while there is none.
@@ -208,6 +236,7 @@ export function mountMap(
     // Stop the pan before it starts, so a click does not grab and drag the map.
     map.dragPan.disable();
     press = { x: event.offsetX, y: event.offsetY, moved: false };
+    draggingTree = options.treeDrag?.start(modelLayer.pick(event.offsetX, event.offsetY)) === true;
   }, true);
   map.on('mousedown', (event: MapMouseEvent) => {
     if (event.originalEvent.shiftKey && !tracing) {
@@ -241,6 +270,11 @@ export function mountMap(
       if (!press.moved) {
         if (Math.hypot(dx, dy) < 5) return;
         press.moved = true;
+      }
+      if (draggingTree) {
+        const ground = modelLayer.pick(event.point.x, event.point.y).ground;
+        if (ground !== null) options.treeDrag?.move(ground);
+        return;
       }
       map.panBy([-dx, -dy], { animate: false }, { byUser: true });
       press = { x: event.point.x, y: event.point.y, moved: true };
@@ -310,7 +344,19 @@ export function mountMap(
     const current = press;
     press = null;
     map.dragPan.enable();
+    if (draggingTree) {
+      draggingTree = false;
+      options.treeDrag?.end(current?.moved === true);
+      if (current?.moved === true) {
+        swallowFollowingClick();
+        return;
+      }
+    }
     if (current === null || current.moved || tracing) return;
+    if (options.onPlainClick?.(modelLayer.pick(current.x, current.y)) === true) {
+      swallowFollowingClick();
+      return;
+    }
     const parts = buildingUnderCursor(map, { x: current.x, y: current.y });
     if (parts.length === 0) return;
     options.onBuilding(parts);
@@ -402,9 +448,16 @@ export function mountMap(
       modelShown = model !== null;
       modelLayer.setModel(model);
       showBlocks();
+      basemap.refresh();
     },
     setSun(sun) {
       modelLayer.setSun(sun);
+    },
+    setTrees(trees, selectedId) {
+      modelLayer.setTrees(trees, selectedId);
+    },
+    moveTree(id, at) {
+      modelLayer.moveTree(id, at);
     },
     setOsmRing(ring) {
       osmRing = ring.map((point) => ({ ...point }));
@@ -455,15 +508,56 @@ const UNDER_SELECTION = 'underSelection';
  * blocky, like the Burj Khalifa's outline as a solid 490 m slab, and that gray block would show
  * through and around the selection's shape.
  */
+/** Neighbours this close to the selection are redrawn in 3D, as far as the trees reach and a little more. */
+const NEIGHBOUR_REACH_M = 60;
+/** A selection wider than this is a district; redrawing everything around it would be too much. */
+const MAX_NEIGHBOUR_SPAN_M = 600;
+
+function ringAreaM2(ring: readonly LngLat[]): number {
+  const first = ring[0];
+  if (first === undefined) return 0;
+  const local = ring.map((point) => projectToLocal(point, first));
+  let twice = 0;
+  for (let i = 0; i < local.length; i += 1) {
+    const a = local[i];
+    const b = local[(i + 1) % local.length];
+    if (a === undefined || b === undefined) continue;
+    twice += a.east * b.north - b.east * a.north;
+  }
+  return twice / 2;
+}
+
+function footprintSpanM(rings: readonly (readonly LngLat[])[]): number {
+  const corners = rings.flat();
+  const first = corners[0];
+  if (first === undefined) return 0;
+  const local = corners.map((point) => projectToLocal(point, first));
+  const east = local.map((point) => point.east);
+  const north = local.map((point) => point.north);
+  return Math.max(Math.max(...east) - Math.min(...east), Math.max(...north) - Math.min(...north));
+}
+
+/** A basemap building near the selection, redrawn in 3D so shadows fall on it. */
+export interface NeighbourBlock {
+  key: string;
+  ring: LngLat[];
+  heightM: number;
+  baseM: number;
+}
+
 function hideBasemapUnderSelection(
   map: MapLibreMap,
   selected: () => readonly (readonly LngLat[])[],
   tallest: () => number,
+  /** How far around the selection to redraw neighbours in 3D. Zero draws none. */
+  neighbourReachM: () => number,
+  onNeighbours: (blocks: NeighbourBlock[]) => void,
 ): { install: () => void; refresh: () => void } {
   const layers: { id: string; source: string }[] = [];
   type Flattened = { source: string; id: string | number; center: LngLat };
   let hidden = new Map<string, Flattened>();
   let dirty = false;
+  let lastNeighbours = '';
 
   /**
    * A flattened building may not answer the next query, and dropping it then would make it pop
@@ -481,6 +575,14 @@ function hideBasemapUnderSelection(
         next.set(`${source}:${feature.id}`, { source, id: feature.id, center });
       }
     }
+    // Nearby buildings are flattened too and redrawn in 3D, where they can take a shadow.
+    const blocks = neighbours(next);
+    for (const block of blocks) next.set(block.flattened.key, block.flattened.target);
+    const signature = blocks.map((block) => block.block.key).join('|');
+    if (signature !== lastNeighbours) {
+      lastNeighbours = signature;
+      onNeighbours(blocks.map((block) => block.block));
+    }
     for (const [key, target] of hidden) {
       if (next.has(key)) continue;
       map.setFeatureState({ source: target.source, sourceLayer: 'building', id: target.id }, { [UNDER_SELECTION]: false });
@@ -490,6 +592,62 @@ function hideBasemapUnderSelection(
       map.setFeatureState({ source: target.source, sourceLayer: 'building', id: target.id }, { [UNDER_SELECTION]: true });
     }
     hidden = next;
+  };
+
+  /** Building pieces whose centre is within reach of the selection's outlines, not already flattened under it. */
+  const neighbours = (underSelection: Map<string, Flattened>) => {
+    const reach = neighbourReachM();
+    const rings = selected();
+    const corners = rings.flat();
+    if (reach <= 0 || corners.length === 0 || layers.length === 0) return [];
+    const first = corners[0] as LngLat;
+    const local = corners.map((point) => projectToLocal(point, first));
+    const minEast = Math.min(...local.map((point) => point.east)) - reach;
+    const maxEast = Math.max(...local.map((point) => point.east)) + reach;
+    const minNorth = Math.min(...local.map((point) => point.north)) - reach;
+    const maxNorth = Math.max(...local.map((point) => point.north)) + reach;
+    // A building near a tile's edge comes back once per tile, each copy clipped differently.
+    // Two copies would draw the same roof twice and flicker, so the most complete one is kept.
+    const found = new Map<string, { area: number; blocks: { block: NeighbourBlock; flattened: { key: string; target: Flattened } }[] }>();
+    for (const source of new Set(layers.map((layer) => layer.source))) {
+      for (const feature of map.querySourceFeatures(source, { sourceLayer: 'building' })) {
+        if (feature.id === undefined || feature.id === null || feature.properties.hide_3d === true) continue;
+        const flatKey = `${source}:${feature.id}`;
+        if (underSelection.has(flatKey)) continue;
+        const heightM = Number(feature.properties.render_height ?? 0);
+        const baseM = Number(feature.properties.render_min_height ?? 0);
+        if (!(heightM > baseM)) continue;
+        const polygons = feature.geometry.type === 'Polygon' ? [feature.geometry.coordinates] : feature.geometry.type === 'MultiPolygon' ? feature.geometry.coordinates : [];
+        const blocks: { block: NeighbourBlock; flattened: { key: string; target: Flattened } }[] = [];
+        let area = 0;
+        for (const [index, polygon] of polygons.entries()) {
+          const outer = polygon[0];
+          if (outer === undefined || outer.length < 4) continue;
+          const ring = outer.map(([longitude = 0, latitude = 0]) => ({ longitude, latitude }));
+          const center = centroid(ring);
+          const at = projectToLocal(center, first);
+          if (at.east < minEast || at.east > maxEast || at.north < minNorth || at.north > maxNorth) continue;
+          area += Math.abs(ringAreaM2(ring));
+          blocks.push({ block: { key: `${flatKey}:${index}`, ring, heightM, baseM }, flattened: { key: flatKey, target: { source, id: feature.id, center } } });
+        }
+        const kept = found.get(flatKey);
+        if (blocks.length > 0 && (kept === undefined || area > kept.area)) found.set(flatKey, { area, blocks });
+      }
+    }
+    // The tiles can also hold one building twice under different ids, such as an outline and its
+    // part. Coplanar roofs speckle, so a block inside a larger one of about the same height goes.
+    const all = [...found.values()].flatMap((entry) => entry.blocks).sort((a, b) => Math.abs(ringAreaM2(b.block.ring)) - Math.abs(ringAreaM2(a.block.ring)));
+    const kept: typeof all = [];
+    for (const candidate of all) {
+      const inside = kept.some(
+        (other) =>
+          Math.abs(other.block.heightM - candidate.block.heightM) < 0.5 &&
+          Math.abs(other.block.baseM - candidate.block.baseM) < 0.5 &&
+          ringContains(other.block.ring, centroid(candidate.block.ring)),
+      );
+      if (!inside) kept.push(candidate);
+    }
+    return kept;
   };
 
   return {

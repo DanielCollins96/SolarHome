@@ -1,17 +1,22 @@
 import './style.css';
-import { Box3, Group, Line, Mesh, MeshLambertMaterial, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
+import { Box3, Group, Line, Mesh, MeshLambertMaterial, Plane, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
 import { assembleBuildings, assembleHouse, assembleTrace, type GeographicBuilding } from './house/assemble.ts';
 import { demoHouseModel } from './house/demoHouse.ts';
 import { createHouseObject, partTopHeight } from './house/houseMesh.ts';
 import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
 import { GeoFailure, searchAddresses } from './geo/geocode.ts';
+import { inCalgary, lacksHeight, loadCalgaryCanopy, loadCalgaryTrees, type ListedTree, withCalgaryHeights } from './geo/calgary.ts';
 import { buildingContains, loadBuilding, loadBuildingsInBounds, loadWholeBuilding } from './geo/overpass.ts';
-import { projectToLocal, unprojectRing } from './geo/projection.ts';
+import { localToLngLat, projectRing, projectToLocal, unprojectRing, type LngLat } from './geo/projection.ts';
 import { DEMO_LOCATION } from './scene/demoLocation.ts';
 import { createGround, createGroundGrid } from './scene/groundPlane.ts';
 import { createNeighbourGroup } from './scene/neighbourMesh.ts';
 import { createNorthArrow } from './scene/northArrow.ts';
+import { createTreeEdits, MAX_TREE_HEIGHT_M, MAX_TREE_WIDTH_M, MIN_TREE_HEIGHT_M, MIN_TREE_WIDTH_M, type PlacedTree } from './scene/treeEdits.ts';
+import { createTreeGroup, moveTreeMesh, planTrees, treeHeightOf, type TreeCrown, type TreeKind, type TreePoint } from './scene/treeMesh.ts';
+import type { PlanPoint } from './house/centering.ts';
+import { pointInRing } from './house/planGeometry.ts';
 import {
   createCamera,
   createFillLight,
@@ -39,6 +44,7 @@ import {
 } from './sun/sunPosition.ts';
 import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, timeZoneAt, zonedLocalToDate } from './sun/zonedTime.ts';
 import { mountAddressSearch } from './ui/addressSearch.ts';
+import { mountTreeEditor } from './ui/treeEditor.ts';
 import { mountCompass, mountSunBadge } from './ui/compass.ts';
 import { DEFAULT_CLOCK, mountControls } from './ui/controls.ts';
 import { mountMap, type AreaBounds, type PickedFootprint } from './ui/mapView.ts';
@@ -89,10 +95,20 @@ let site: Site = {
 let model = demoHouseModel();
 let picked: GeographicBuilding[] = [];
 const knownBuildings: GeographicBuilding[] = [];
+/** Trees are drawn this far around the selection: the yard and the next one over, where shade matters most. */
+const TREE_REACH_M = 25;
+/** A selection wider than this, trees included, is a district rather than a home and its street. */
+const MAX_TREE_AREA_M = 600;
+/** Crown width of a newly planted tree, about a young mountain ash. */
+const NEW_TREE_WIDTH_M = 5;
+/** Buildings already looked up in the City of Calgary's heights, by id, with any height it added. */
+const cityChecked = new Map<string, GeographicBuilding>();
 let openingDone: Promise<void> = Promise.resolve();
 /** Set once the person selects anything, so the slow opening lookup does not replace their choice. */
 let userSelected = false;
 let viewRadius = 12;
+/** Half the width the sun's shadow must cover: the model, and its trees once they load. */
+let shadowRadius = 12;
 let searchToken = 0;
 const searchAbort = { current: new AbortController() };
 
@@ -125,6 +141,15 @@ try {
   scene.add(grid);
   const neighbours = createNeighbourGroup();
   scene.add(neighbours);
+  let trees = new Group();
+  scene.add(trees);
+  let treeToken = 0;
+  /** The city's trees around the current model, before the person's edits. */
+  let cityTrees: PlacedTree[] = [];
+  let treeOrigin: LngLat | null = null;
+  let selectedTreeId: string | null = null;
+  let draggedTree: { id: string; to: PlanPoint | null } | null = null;
+  const treeEdits = createTreeEdits();
   let arrow = createNorthArrow();
   scene.add(arrow);
 
@@ -163,6 +188,12 @@ try {
     onMove: (center) => {
       releaseDistantSelection(center);
     },
+    onPlainClick: (hit) => clickTrees(hit),
+    treeDrag: {
+      start: (hit) => startTreeDrag(hit.treeId),
+      move: (ground) => dragTree(ground),
+      end: (moved) => endTreeDrag(moved),
+    },
   });
 
   const address = mountAddressSearch(panel.tools, {
@@ -178,6 +209,29 @@ try {
     },
   });
 
+  const treeEditor = mountTreeEditor(panel.tools, {
+    onToggle: (editing) => {
+      map.setNote(editing ? 'Editing trees. Click a tree to resize it, drag it to move it, or click open ground to plant one.' : '');
+      selectTree(null);
+    },
+    onKind: (kind) => editSelectedTree({ kind }),
+    onWidth: (factor) => {
+      const tree = selectedTree();
+      if (tree === undefined) return;
+      editSelectedTree({ widthM: Math.min(MAX_TREE_WIDTH_M, Math.max(MIN_TREE_WIDTH_M, tree.widthM * factor)) });
+    },
+    onHeight: (factor) => {
+      const tree = selectedTree();
+      if (tree === undefined) return;
+      editSelectedTree({ heightM: Math.min(MAX_TREE_HEIGHT_M, Math.max(MIN_TREE_HEIGHT_M, treeHeightOf(tree) * factor)) });
+    },
+    onRemove: () => editSelectedTree({ removed: true }),
+    onReset: () => {
+      if (treeOrigin !== null) treeEdits.resetAround(treeOrigin, MAX_TREE_AREA_M);
+      selectTree(null);
+    },
+  });
+
   updateSun = () => {
     const { year, month, day } = parseISODate(clock.date);
     const hour = Math.floor(clock.minutes / 60);
@@ -189,7 +243,8 @@ try {
     const sun = sunDirection(instant, site.latitude, site.longitude);
     sunNow = sun;
     map.setSun(sun);
-    placeSun(sunLight, sun, sun.altitudeDeg, orbitTarget, Math.max(50, viewRadius * 4));
+    // Far enough out that trees on the sun's side are still between the light and the house.
+    placeSun(sunLight, sun, sun.altitudeDeg, orbitTarget, Math.max(50, viewRadius * 4, shadowRadius * 3));
     placeSunMarker(sunMarker, sun, sun.altitudeDeg, orbitTarget, camera);
     placeSunArrow(sunArrow, sun, sun.altitudeDeg, orbitTarget, Math.max(16, viewRadius * 2.4));
     const shadow = shadowFallDirection(sun);
@@ -218,6 +273,7 @@ try {
     viewRadius = radius;
     frameHouse(camera, controls, box);
     fitSunShadow(sunLight, radius);
+    shadowRadius = radius;
     const groundSize = Math.max(48, radius * 8);
     ground.geometry.dispose();
     ground.geometry = new PlaneGeometry(groundSize, groundSize);
@@ -231,6 +287,7 @@ try {
     arrow = createNorthArrow(box.max.z);
     scene.add(arrow);
     neighbours.visible = false;
+    void showTrees(next);
     if (options.syncMap) {
       map.setModel(next);
       map.setFootprints(
@@ -407,6 +464,8 @@ try {
       return;
     }
     address.setClearEnabled(true);
+    picked = picked.map((building) => cityChecked.get(building.id) ?? building);
+    void addCityHeights(note);
     model = assembleBuildings(picked);
     site = { ...siteAt(model.origin), label: model.label };
     describeSite(site.timeZone === null ? `${model.label}. ${FIXED_OFFSET_NOTE}` : model.label);
@@ -415,6 +474,156 @@ try {
     const message = `${count}. ${note} Double-click a building here to remove it, or hover it and press Delete.`;
     address.setMessage(message);
     map.setNote(message);
+  }
+
+  /**
+   * In Calgary, fill in the city's measured heights where OpenStreetMap has none, then redraw.
+   * Each building is asked about once; a failed request leaves the OSM estimate in place.
+   */
+  async function addCityHeights(note: string): Promise<void> {
+    const pending = picked.filter((building) => {
+      const corner = building.parts[0]?.outer[0];
+      return !cityChecked.has(building.id) && corner !== undefined && inCalgary(corner) && lacksHeight(building);
+    });
+    if (pending.length === 0) return;
+    for (const building of pending) cityChecked.set(building.id, building);
+    const measured = await Promise.all(pending.map((building) => withCalgaryHeights(building, fetch).catch(() => building)));
+    let changed = false;
+    measured.forEach((building, index) => {
+      if (building === pending[index]) return;
+      changed = true;
+      cityChecked.set(building.id, building);
+      const known = knownBuildings.findIndex((item) => item.id === building.id);
+      if (known >= 0) knownBuildings[known] = building;
+    });
+    if (changed && picked.some((building) => pending.includes(building))) showPicked(note);
+  }
+
+  /**
+   * In Calgary, draw the city's tree canopy around the model, so trees shade it like buildings do.
+   * A larger selection than a block or two would download thousands of crowns, so it gets none.
+   */
+  async function showTrees(next: HouseModel): Promise<void> {
+    const token = ++treeToken;
+    cityTrees = [];
+    treeOrigin = next.origin;
+    selectTree(null);
+    const points = next.parts.flatMap((part) => part.footprint);
+    if (!inCalgary(next.origin) || points.length === 0) return;
+    const east = points.map((point) => point.east);
+    const north = points.map((point) => point.north);
+    const box = {
+      west: Math.min(...east) - TREE_REACH_M,
+      east: Math.max(...east) + TREE_REACH_M,
+      south: Math.min(...north) - TREE_REACH_M,
+      north: Math.max(...north) + TREE_REACH_M,
+    };
+    if (box.east - box.west > MAX_TREE_AREA_M || box.north - box.south > MAX_TREE_AREA_M) return;
+    const southWest = localToLngLat({ east: box.west, north: box.south }, next.origin);
+    const northEast = localToLngLat({ east: box.east, north: box.north }, next.origin);
+    const area = { south: southWest.latitude, west: southWest.longitude, north: northEast.latitude, east: northEast.longitude };
+    let rings: LngLat[][];
+    let listed: ListedTree[];
+    try {
+      // The inventory only names the kind of tree; without it the canopy alone still works.
+      [rings, listed] = await Promise.all([loadCalgaryCanopy(area, fetch), loadCalgaryTrees(area, fetch).catch(() => [])]);
+    } catch {
+      // Trees are extra. Without them the model and its shadow are still right.
+      return;
+    }
+    if (token !== treeToken) return;
+    const named = namedTrees(rings, listed, next.origin);
+    const avoid = next.parts.map((part) => part.footprint);
+    cityTrees = planTrees(named.crowns, named.points, avoid).map((tree) => {
+      const at = localToLngLat(tree.at, next.origin);
+      return { id: `city:${at.latitude.toFixed(6)},${at.longitude.toFixed(6)}`, at, kind: tree.kind, widthM: tree.widthM };
+    });
+    drawTrees();
+  }
+
+  /** The city's trees with the person's edits, and the trees they planted near the model. */
+  function currentTrees(): PlacedTree[] {
+    const origin = treeOrigin;
+    if (origin === null) return [];
+    return treeEdits.apply(cityTrees).filter((tree) => {
+      const offset = projectToLocal(tree.at, origin);
+      return Math.hypot(offset.east, offset.north) <= MAX_TREE_AREA_M;
+    });
+  }
+
+  function drawTrees(): void {
+    scene.remove(trees);
+    disposeObject(trees);
+    const origin = treeOrigin;
+    const specs =
+      origin === null
+        ? []
+        : currentTrees().map((tree) => ({ ...tree, at: projectToLocal(tree.at, origin) }));
+    const ringed = treeEditor.editing() ? selectedTreeId : null;
+    trees = createTreeGroup(specs, ringed);
+    scene.add(trees);
+    map.setTrees(specs, ringed);
+    // Grow the shadow to reach the trees around the model.
+    const reach = new Box3().setFromObject(house).union(new Box3().setFromObject(trees));
+    const size = reach.getSize(new Vector3());
+    shadowRadius = Math.max(size.x, size.z, 8) / 2;
+    fitSunShadow(sunLight, shadowRadius);
+    updateSun();
+  }
+
+  function selectTree(id: string | null): void {
+    selectedTreeId = id;
+    const tree = selectedTree();
+    treeEditor.setSelected(tree === undefined ? null : { kind: tree.kind, widthM: tree.widthM, heightM: treeHeightOf(tree) });
+    drawTrees();
+  }
+
+  function selectedTree(): PlacedTree | undefined {
+    return selectedTreeId === null ? undefined : currentTrees().find((item) => item.id === selectedTreeId);
+  }
+
+  function editSelectedTree(change: { removed?: boolean; kind?: TreeKind; widthM?: number; heightM?: number }): void {
+    const tree = selectedTree();
+    if (tree === undefined) return;
+    treeEdits.update(tree, change);
+    selectTree(change.removed === true ? null : tree.id);
+  }
+
+  /** While editing trees, pressing on one starts moving it. Only that tree moves until the drop. */
+  function startTreeDrag(treeId: string | null): boolean {
+    if (!treeEditor.editing() || treeId === null) return false;
+    draggedTree = { id: treeId, to: null };
+    return true;
+  }
+
+  function dragTree(ground: PlanPoint): void {
+    if (draggedTree === null) return;
+    draggedTree.to = ground;
+    moveTreeMesh(trees, draggedTree.id, ground);
+    map.moveTree(draggedTree.id, ground);
+  }
+
+  /** Save where the tree was dropped. A press that never moved is a click, which selects it instead. */
+  function endTreeDrag(moved: boolean): void {
+    const drag = draggedTree;
+    draggedTree = null;
+    if (!moved || drag === null || drag.to === null || treeOrigin === null) return;
+    const tree = currentTrees().find((item) => item.id === drag.id);
+    if (tree === undefined) return;
+    treeEdits.update(tree, { at: localToLngLat(drag.to, treeOrigin) });
+    selectTree(drag.id);
+  }
+
+  /** While editing trees, a click picks a tree, or plants one on open ground. */
+  function clickTrees(hit: { treeId: string | null; ground: PlanPoint | null }): boolean {
+    if (!treeEditor.editing()) return false;
+    if (hit.treeId !== null) {
+      selectTree(hit.treeId);
+    } else if (hit.ground !== null && treeOrigin !== null) {
+      const planted = treeEdits.plant(localToLngLat(hit.ground, treeOrigin), 'deciduous', NEW_TREE_WIDTH_M);
+      selectTree(planted.id);
+    }
+    return true;
   }
 
   async function runArea(bounds: AreaBounds): Promise<void> {
@@ -567,6 +776,50 @@ try {
     highlightBuilding(buildingGroupAt(event));
   });
   canvas.addEventListener('pointerleave', () => highlightBuilding(null));
+  /** The tree under the pointer in 3D, and where the pointer meets the ground. */
+  const treeHitAt = (event: { clientX: number; clientY: number }): { treeId: string | null; ground: PlanPoint | null } => {
+    const rect = canvas.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    let treeId: string | null = null;
+    for (const hit of raycaster.intersectObject(trees, true)) {
+      let node: Object3D | null = hit.object;
+      while (node !== null && typeof node.userData.treeId !== 'string') node = node.parent;
+      if (node !== null) {
+        treeId = node.userData.treeId as string;
+        break;
+      }
+    }
+    const ground = raycaster.ray.intersectPlane(new Plane(new Vector3(0, 1, 0), 0), new Vector3());
+    return { treeId, ground: ground === null ? null : { east: ground.x, north: -ground.z } };
+  };
+  // A click that was really a drag, to turn the view or move a tree, must not plant a tree.
+  let pressedAt: { x: number; y: number } | null = null;
+  const pressMoved = (event: { clientX: number; clientY: number }) =>
+    pressedAt !== null && Math.hypot(event.clientX - pressedAt.x, event.clientY - pressedAt.y) > 4;
+  canvas.addEventListener('pointerdown', (event) => {
+    pressedAt = { x: event.clientX, y: event.clientY };
+    if (stage.classList.contains('inset') || event.button !== 0) return;
+    if (!startTreeDrag(treeHitAt(event).treeId)) return;
+    // The press moves the tree, so the view must not turn with it.
+    controls.enabled = false;
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (draggedTree === null || !pressMoved(event)) return;
+    const ground = treeHitAt(event).ground;
+    if (ground !== null) dragTree(ground);
+  });
+  canvas.addEventListener('pointerup', (event) => {
+    if (draggedTree === null) return;
+    controls.enabled = true;
+    endTreeDrag(pressMoved(event));
+  });
+  canvas.addEventListener('click', (event) => {
+    if (stage.classList.contains('inset') || !treeEditor.editing() || pressedAt === null || pressMoved(event)) return;
+    clickTrees(treeHitAt(event));
+  });
   canvas.addEventListener('dblclick', (event) => {
     if (stage.classList.contains('inset')) return;
     removeHighlighted(buildingGroupAt(event));
@@ -575,6 +828,11 @@ try {
     if (event.key !== 'Delete' && event.key !== 'Backspace') return;
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+    if (treeEditor.editing() && selectedTreeId !== null) {
+      event.preventDefault();
+      editSelectedTree({ removed: true });
+      return;
+    }
     if (stage.classList.contains('inset') || highlighted === null) return;
     event.preventDefault();
     removeHighlighted(highlighted);
@@ -771,4 +1029,21 @@ function disposeObject(root: Object3D): void {
       else material.dispose();
     }
   });
+}
+
+/**
+ * Canopy outlines take their kind from a listed tree standing in them. Listed trees outside any
+ * outline, usually young ones under the canopy's 2 m floor, are drawn at their own size.
+ */
+function namedTrees(rings: readonly LngLat[][], listed: readonly ListedTree[], origin: LngLat): { crowns: TreeCrown[]; points: TreePoint[] } {
+  const crowns: TreeCrown[] = rings.map((ring) => ({ outline: projectRing(ring, origin) }));
+  const points: TreePoint[] = [];
+  for (const tree of listed) {
+    const at = projectToLocal(tree.at, origin);
+    const kind = tree.evergreen ? 'evergreen' : 'deciduous';
+    const crown = crowns.find((item) => pointInRing(at, item.outline));
+    if (crown === undefined) points.push({ at, kind, widthM: tree.widthM });
+    else crown.kind ??= kind;
+  }
+  return { crowns, points };
 }
