@@ -123,9 +123,10 @@ describe('height and roof tags', () => {
   it('maps roof shapes and treats an unknown shape as a 25° gable', () => {
     expect(estimateRoof({ 'roof:shape': 'skillion', 'roof:direction': 'S' }, rectangle).roof.type).toBe('shed');
     expect(estimateRoof({ 'roof:shape': 'hipped' }, rectangle).roof.type).toBe('hip');
-    const unknown = estimateRoof({ 'roof:shape': 'dome' }, rectangle);
+    expect(estimateRoof({ 'roof:shape': 'dome' }, rectangle).roof.type).toBe('hip');
+    const unknown = estimateRoof({ 'roof:shape': 'mansard' }, rectangle);
     expect(unknown.roof).toMatchObject({ type: 'gable', pitchDeg: 25 });
-    expect(unknown.issues[0]).toContain('dome');
+    expect(unknown.issues[0]).toContain('mansard');
   });
 
   it('guesses a flat roof for a large building with no roof tag, a gable for a house', () => {

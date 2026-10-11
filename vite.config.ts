@@ -10,6 +10,13 @@ const proxy: Record<string, ProxyOptions> = {
     rewrite: (path) => path.replace(/^\/api\/nominatim/, ''),
     headers: appHeaders,
   },
+  // Single buildings come from the main API. Overpass is only used for box selections.
+  '/api/osm': {
+    target: 'https://api.openstreetmap.org',
+    changeOrigin: true,
+    rewrite: (path) => path.replace(/^\/api\/osm/, '/api/0.6'),
+    headers: appHeaders,
+  },
   '/api/overpass': {
     target: 'https://overpass-api.de',
     changeOrigin: true,

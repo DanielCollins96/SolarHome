@@ -1,11 +1,13 @@
 import type { Feature, FeatureCollection, GeoJsonProperties, Position } from 'geojson';
 import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
-import type { GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
+import type { ExpressionSpecification, GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { localToLngLat, projectToLocal, type LngLat } from '../geo/projection.ts';
 import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
+import type { HouseModel } from '../house/houseModel.ts';
+import { createModelLayer } from './modelLayer.ts';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
 setWorkerUrl(maplibreWorkerUrl);
@@ -36,6 +38,8 @@ export interface MapController {
   setTrace(ring: LngLat[]): void;
   /** `heightM` is the top above the ground; `baseM` lifts a part such as a tower's pod. */
   setFootprints(rings: readonly { ring: readonly LngLat[]; heightM: number | null; baseM?: number }[]): void;
+  /** Draw the selection as its 3D model, roofs included. Null goes back to plain footprints. */
+  setModel(model: HouseModel | null): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -58,6 +62,7 @@ export function mountMap(
     onBuilding: (parts: PickedFootprint[]) => void;
     /** Each entry is one building: the touching outlines that make it up. */
     onBuildings: (buildings: PickedFootprint[][]) => void;
+    /** The person moved the map. Moves the app makes itself, like flying to a result, are not reported. */
     onMove: (center: LngLat) => void;
   },
 ): MapController {
@@ -101,7 +106,15 @@ export function mountMap(
   recenter.addEventListener('click', returnToSelection);
   container.append(recenter);
 
+  const basemap = hideBasemapUnderSelection(map, () => footprints, () => Math.max(0, ...footprintHeights));
+  const modelLayer = createModelLayer('selection-model');
+  let modelShown = false;
+  // The flat-topped red blocks stand in for a model only while there is none.
+  const showBlocks = () => {
+    if (map.getLayer('trace-volume')) map.setLayoutProperty('trace-volume', 'visibility', modelShown ? 'none' : 'visible');
+  };
   map.on('load', () => {
+    basemap.install();
     map.addSource('osm', { type: 'geojson', data: emptyCollection() });
     map.addSource('select-box', { type: 'geojson', data: emptyCollection() });
     map.addSource('trace', { type: 'geojson', data: emptyCollection() });
@@ -142,6 +155,8 @@ export function mountMap(
         'fill-extrusion-base': ['coalesce', ['get', 'base'], 0],
       },
     });
+    map.addLayer(modelLayer.layer);
+    showBlocks();
     map.addLayer({
       id: 'trace-line',
       type: 'line',
@@ -199,7 +214,7 @@ export function mountMap(
         if (Math.hypot(dx, dy) < 5) return;
         press.moved = true;
       }
-      map.panBy([-dx, -dy], { animate: false });
+      map.panBy([-dx, -dy], { animate: false }, { byUser: true });
       press = { x: event.point.x, y: event.point.y, moved: true };
       return;
     }
@@ -311,7 +326,10 @@ export function mountMap(
     }
     publish(true);
   });
-  map.on('move', () => {
+  map.on('move', (event: { originalEvent?: Event; byUser?: boolean }) => {
+    // Only the person's own moves count. The app's flight to a new search result passes far
+    // from it on the way, and must not clear the building it is flying to.
+    if (event.originalEvent === undefined && event.byUser !== true) return;
     const center = map.getCenter();
     options.onMove({ longitude: center.lng, latitude: center.lat });
   });
@@ -350,6 +368,12 @@ export function mountMap(
       footprintBases = kept.map((entry) => entry.baseM ?? 0);
       vertices = footprints.length === 1 ? (footprints[0]?.map((point) => ({ ...point })) ?? []) : [];
       publish(false);
+      basemap.refresh();
+    },
+    setModel(model) {
+      modelShown = model !== null;
+      modelLayer.setModel(model);
+      showBlocks();
     },
     setOsmRing(ring) {
       osmRing = ring.map((point) => ({ ...point }));
@@ -391,6 +415,143 @@ export function mountMap(
       map.resize();
     },
   };
+}
+
+const UNDER_SELECTION = 'underSelection';
+
+/**
+ * Flatten the basemap's own 3D buildings under the selection. The tiles draw some landmarks
+ * blocky, like the Burj Khalifa's outline as a solid 490 m slab, and that gray block would show
+ * through and around the selection's shape.
+ */
+function hideBasemapUnderSelection(
+  map: MapLibreMap,
+  selected: () => readonly (readonly LngLat[])[],
+  tallest: () => number,
+): { install: () => void; refresh: () => void } {
+  const layers: { id: string; source: string }[] = [];
+  type Flattened = { source: string; id: string | number; center: LngLat };
+  let hidden = new Map<string, Flattened>();
+  let dirty = false;
+
+  /**
+   * A flattened building may not answer the next query, and dropping it then would make it pop
+   * back up. So each one keeps its centre, and stays flat while that centre is still selected.
+   */
+  const apply = () => {
+    dirty = false;
+    const rings = selected();
+    const stillSelected = (center: LngLat) => rings.some((ring) => ringContains(ring, center));
+    const next = new Map([...hidden].filter(([, target]) => stillSelected(target.center)));
+    if (rings.length > 0 && layers.length > 0) {
+      for (const { feature, center } of featuresUnder(map, rings, layers.map((layer) => layer.id), tallest())) {
+        const source = layers.find((layer) => layer.id === feature.layer.id)?.source;
+        if (source === undefined || feature.id === undefined || feature.id === null) continue;
+        next.set(`${source}:${feature.id}`, { source, id: feature.id, center });
+      }
+    }
+    for (const [key, target] of hidden) {
+      if (next.has(key)) continue;
+      map.setFeatureState({ source: target.source, sourceLayer: 'building', id: target.id }, { [UNDER_SELECTION]: false });
+    }
+    for (const [key, target] of next) {
+      if (hidden.has(key)) continue;
+      map.setFeatureState({ source: target.source, sourceLayer: 'building', id: target.id }, { [UNDER_SELECTION]: true });
+    }
+    hidden = next;
+  };
+
+  return {
+    install() {
+      const style = map.getStyle()?.layers ?? [];
+      for (const layer of style) {
+        if (layer.type !== 'fill-extrusion' || !('source-layer' in layer) || layer['source-layer'] !== 'building') continue;
+        if (typeof layer.source !== 'string') continue;
+        layers.push({ id: layer.id, source: layer.source });
+        // The tiles keep a building's 2D outline next to its 3D parts and mark it `hide_3d`.
+        // The style draws it anyway, so a landmark like the Burj Khalifa gets a solid block
+        // around its parts. Leave those outlines out of the 3D layer.
+        const shown: ExpressionSpecification = ['!', ['to-boolean', ['get', 'hide_3d']]];
+        const filter = map.getFilter(layer.id) as ExpressionSpecification | null | undefined;
+        map.setFilter(layer.id, filter ? ['all', filter, shown] : shown);
+        const flatten = (property: 'fill-extrusion-height' | 'fill-extrusion-base', fallback: ExpressionSpecification) => {
+          // The style's own height, a number or an expression such as ['get', 'render_height'].
+          const current = (map.getPaintProperty(layer.id, property) ?? fallback) as ExpressionSpecification | number;
+          map.setPaintProperty(layer.id, property, ['case', ['boolean', ['feature-state', UNDER_SELECTION], false], 0, current]);
+        };
+        flatten('fill-extrusion-height', ['get', 'render_height']);
+        flatten('fill-extrusion-base', ['get', 'render_min_height']);
+      }
+      // New tiles arrive as the map moves, so the flattened set is rebuilt once the map settles.
+      map.on('moveend', () => {
+        dirty = true;
+      });
+      map.on('sourcedata', (event) => {
+        if (layers.some((layer) => layer.source === event.sourceId) && event.isSourceLoaded) dirty = true;
+      });
+      map.on('idle', () => {
+        if (dirty) apply();
+      });
+      apply();
+    },
+    refresh() {
+      if (layers.length === 0) return;
+      apply();
+    },
+  };
+}
+
+/** Basemap buildings that sit inside the selected outlines. A merged block counts only when all of it is inside. */
+function featuresUnder(
+  map: MapLibreMap,
+  rings: readonly (readonly LngLat[])[],
+  layers: string[],
+  heightM: number,
+): { feature: MapGeoJSONFeature; center: LngLat }[] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const ring of rings) {
+    for (const point of ring) {
+      const screen = map.project([point.longitude, point.latitude]);
+      minX = Math.min(minX, screen.x);
+      minY = Math.min(minY, screen.y);
+      maxX = Math.max(maxX, screen.x);
+      maxY = Math.max(maxY, screen.y);
+    }
+  }
+  if (!Number.isFinite(minX)) return [];
+  // On a tilted map a raised piece, like a tower's upper stage, is drawn well above its footprint.
+  const first = rings[0]?.[0];
+  const rise = first === undefined ? 0 : extrusionPixels(map, heightM, first.latitude);
+  const features = map.queryRenderedFeatures(
+    [
+      [minX - 4, minY - 4 - rise],
+      [maxX + 4, maxY + 4],
+    ],
+    { layers },
+  );
+  const selected = (point: LngLat) => rings.some((ring) => ringContains(ring, point));
+  // A concave piece, like a tower leg arching over open ground, has its centre outside itself,
+  // so a piece also counts when most of its corners are selected.
+  const inside = (outer: LngLat[]) =>
+    selected(centroid(outer)) || outer.filter(selected).length * 2 > outer.length;
+  const found: { feature: MapGeoJSONFeature; center: LngLat }[] = [];
+  for (const feature of features) {
+    const polygons =
+      feature.geometry.type === 'Polygon'
+        ? [feature.geometry.coordinates]
+        : feature.geometry.type === 'MultiPolygon'
+          ? feature.geometry.coordinates
+          : [];
+    const outers = polygons.flatMap((polygon) => (polygon[0] === undefined ? [] : [toRing(polygon[0])]));
+    const first = outers[0];
+    if (first === undefined || !outers.every(inside)) continue;
+    // Kept for later passes: a selected corner, so the piece stays flat while it is selected.
+    found.push({ feature, center: first.find(selected) ?? centroid(first) });
+  }
+  return found;
 }
 
 function mountMapHelp(container: HTMLElement): {

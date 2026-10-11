@@ -70,6 +70,8 @@ function roofTypeFromShape(shape: string | undefined): RoofType | null {
   if (shape === 'skillion' || shape === 'shed' || shape === 'pent' || shape === 'lean_to') return 'shed';
   if (shape === 'gabled' || shape === 'gable' || shape === 'gambrel') return 'gable';
   if (shape === 'hipped' || shape === 'hip' || shape === 'pyramidal' || shape === 'half-hipped') return 'hip';
+  // Round roofs rise to a point too, so a hip is the nearest of the four presets.
+  if (shape === 'dome' || shape === 'cone' || shape === 'onion') return 'hip';
   return null;
 }
 

@@ -96,6 +96,9 @@ let viewRadius = 12;
 let searchToken = 0;
 const searchAbort = { current: new AbortController() };
 
+/** Farther than this from the selection, a building or the map's centre is somewhere else entirely. */
+const DISTANT_SELECTION_M = 8_000;
+
 const FIXED_OFFSET_NOTE = 'Time uses a fixed offset from longitude, without daylight saving.';
 
 /** The place's own time zone, so the clock matches local time including daylight saving. */
@@ -219,7 +222,8 @@ try {
     ground.geometry = new PlaneGeometry(groundSize, groundSize);
     scene.remove(grid);
     disposeObject(grid);
-    grid = createGroundGrid(groundSize);
+    // A 2 m grid over a whole district would be millions of lines. Past 2 km the grid stays put.
+    grid = createGroundGrid(Math.min(groundSize, 2_000));
     scene.add(grid);
     scene.remove(arrow);
     disposeObject(arrow);
@@ -227,6 +231,7 @@ try {
     scene.add(arrow);
     neighbours.visible = false;
     if (options.syncMap) {
+      map.setModel(next);
       map.setFootprints(
         next.parts.map((part) => ({
           ring: unprojectRing(part.footprint, next.origin),
@@ -275,17 +280,25 @@ try {
     const first = parts[0];
     if (first === undefined) return;
     const center = ringCentroid(first.outer);
-    const known = knownBuildingIn(parts);
+    // Only the piece under the cursor says which loaded building was clicked. Its touching
+    // neighbours can include another landmark, like the Calgary Tower within Tower Centre.
+    const known = knownBuildingIn([first]);
     const building = known ?? partsToBuilding(parts);
-    const index = picked.findIndex(
-      (item) => sameBuilding(item, building) || buildingContains(item, center.latitude, center.longitude),
-    );
+    // A building far from the current selection starts a new one. Joining two cities into one
+    // model would put them thousands of kilometres apart in a single scene.
+    const away = projectToLocal(center, model.origin);
+    if (picked.length > 0 && Math.hypot(away.east, away.north) > DISTANT_SELECTION_M) picked = [];
+    const index = picked.findIndex((item) => sameBuilding(item, building) || holds(item, first.outer));
     if (index >= 0) {
       picked.splice(index, 1);
       showPicked(picked.length === 0 ? 'Selection cleared.' : 'Removed that building.');
       return;
     }
-    picked = picked.filter((item) => !sameBuilding(item, building) && !coveredBy(building, item));
+    // A map piece inside the new building is replaced by it. A building loaded from OpenStreetMap
+    // is its own building, like the Calgary Tower standing inside Tower Centre, and stays.
+    picked = picked.filter(
+      (item) => !sameBuilding(item, building) && (knownBuildings.includes(item) || !coveredBy(building, item)),
+    );
     picked.push(building);
     showPicked('Selected that building.');
     if (known === undefined && mayBeRelation(building)) void upgradeSelection(building, ++upgradeToken);
@@ -294,10 +307,14 @@ try {
   async function upgradeSelection(placeholder: GeographicBuilding, token: number): Promise<void> {
     const center = ringCentroid(placeholder.parts[0]?.outer ?? []);
     try {
-      const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache }, reachFrom(placeholder, center) + 5);
-      if (token !== upgradeToken || !buildingContains(whole, center.latitude, center.longitude)) return;
+      // Every corner of the clicked map pieces helps find the building they belong to.
+      const corners = placeholder.parts.flatMap((part) => part.outer).slice(0, 400);
+      const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache }, reachFrom(placeholder, center) + 5, corners);
+      if (token !== upgradeToken || !overlaps(whole, placeholder, center)) return;
       if (!picked.some((item) => sameBuilding(item, placeholder))) return;
-      if (footprintReach(whole) > footprintReach(placeholder) * 6) return;
+      // A map piece can be one pillar of a landmark, so a much larger whole is fine up to the
+      // size of a landmark. Beyond that, a click on a house must not pull in a city block.
+      if (footprintReach(whole) > Math.max(footprintReach(placeholder) * 6, 400)) return;
       rememberBuilding(whole);
       picked = picked.filter((item) => !sameBuilding(item, placeholder) && !coveredBy(whole, item));
       picked.push(whole);
@@ -350,13 +367,13 @@ try {
   function releaseDistantSelection(center: { latitude: number; longitude: number }): void {
     if (picked.length === 0) return;
     const offset = projectToLocal(center, model.origin);
-    if (Math.hypot(offset.east, offset.north) < 8_000) return;
+    if (Math.hypot(offset.east, offset.north) < DISTANT_SELECTION_M) return;
     picked = [];
     for (let index = knownBuildings.length - 1; index >= 0; index -= 1) {
       const place = knownBuildings[index]?.parts[0]?.outer[0];
       if (place === undefined) continue;
       const step = projectToLocal(place, center);
-      if (Math.hypot(step.east, step.north) > 8_000) knownBuildings.splice(index, 1);
+      if (Math.hypot(step.east, step.north) > DISTANT_SELECTION_M) knownBuildings.splice(index, 1);
     }
     showPicked('Selection cleared.');
     site = { latitude: center.latitude, longitude: center.longitude, timeZone: timeZoneAt(center.latitude, center.longitude), label: 'Map' };
@@ -371,6 +388,7 @@ try {
     map.setOsmRing([]);
     if (picked.length === 0) {
       map.setFootprints([]);
+      map.setModel(null);
       map.setNote('');
       replaceHouse(new Group());
       address.setClearEnabled(false);
@@ -585,11 +603,16 @@ function formatOffset(minutes: number): string {
 }
 
 function footprintReach(building: GeographicBuilding): number {
-  const origin = building.parts[0]?.outer[0];
+  return ringsReach(building.parts.map((part) => part.outer));
+}
+
+/** Farthest any corner gets from the first corner: a rough size in metres. */
+function ringsReach(rings: readonly (readonly { latitude: number; longitude: number }[])[]): number {
+  const origin = rings[0]?.[0];
   if (origin === undefined) return 0;
   let reach = 0;
-  for (const part of building.parts) {
-    for (const point of part.outer) {
+  for (const ring of rings) {
+    for (const point of ring) {
       const local = projectToLocal(point, origin);
       reach = Math.max(reach, Math.hypot(local.east, local.north));
     }
@@ -637,6 +660,19 @@ function rememberBuilding(building: GeographicBuilding): void {
   knownBuildings.push(building);
 }
 
+/**
+ * The lookup found the same building as the map outline. A tower's parts can leave its centre
+ * over open ground between the legs, so either one holding the other's centre counts.
+ */
+function overlaps(whole: GeographicBuilding, placeholder: GeographicBuilding, center: { latitude: number; longitude: number }): boolean {
+  if (buildingContains(whole, center.latitude, center.longitude)) return true;
+  return whole.parts.some((part) => {
+    if (part.outer.length === 0) return false;
+    const middle = ringCentroid(part.outer);
+    return buildingContains(placeholder, middle.latitude, middle.longitude);
+  });
+}
+
 /** Farthest corner of the building from a point inside it. */
 function reachFrom(building: GeographicBuilding, center: { latitude: number; longitude: number }): number {
   let reach = 0;
@@ -651,11 +687,22 @@ function reachFrom(building: GeographicBuilding, center: { latitude: number; lon
 
 function knownBuildingIn(parts: readonly PickedFootprint[]): GeographicBuilding | undefined {
   for (const part of parts) {
-    const center = ringCentroid(part.outer);
-    const known = knownBuildingAt(center.latitude, center.longitude);
+    const known = knownBuildings.find((building) => holds(building, part.outer));
     if (known !== undefined) return known;
   }
   return undefined;
+}
+
+/**
+ * The clicked map piece is part of this building: its centre is inside, and the building is not
+ * much smaller than the piece. Tower Centre wraps around the Calgary Tower, so its centre falls
+ * inside the tower's footprint, but it is not part of the tower.
+ */
+function holds(building: GeographicBuilding, piece: readonly { latitude: number; longitude: number }[]): boolean {
+  if (piece.length === 0) return false;
+  const center = ringCentroid(piece);
+  if (!buildingContains(building, center.latitude, center.longitude)) return false;
+  return footprintReach(building) >= ringsReach([piece]) * 0.5;
 }
 
 /**

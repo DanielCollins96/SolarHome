@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { createLookupCache } from '../src/geo/cache.ts';
 import { GeoFailure, searchAddresses } from '../src/geo/geocode.ts';
-import { buildingFromElements, loadBuilding, loadBuildingsInBounds, wholeBuildingFromElements } from '../src/geo/overpass.ts';
+import {
+  buildingFromElements,
+  loadBuilding,
+  loadBuildingsInBounds,
+  loadWholeBuilding,
+  wholeBuildingFromElements,
+} from '../src/geo/overpass.ts';
 
 const nominatimBody = JSON.stringify([
   {
@@ -105,7 +111,8 @@ describe('building lookup', () => {
     };
     const first = await loadBuilding(hit, { fetch: fetchImpl, cache });
     await loadBuilding(hit, { fetch: fetchImpl, cache });
-    expect(calls).toBe(1);
+    // The first lookup asks for the way's parent buildings, the way itself, and the map inside it for loose parts.
+    expect(calls).toBe(3);
     expect(cache.wasMemoryHit()).toBe(true);
     expect(first.label).toBe('Sample House');
     expect(first.tags['building:levels']).toBe('2');
@@ -206,6 +213,83 @@ describe('building lookup', () => {
     };
     const buildings = await loadBuildingsInBounds(bounds, { fetch: fetchImpl, cache: createLookupCache() });
     expect(buildings.map((building) => building.id)).toEqual(['way/1']);
+  });
+
+  it('reads the main API format, where ways list node ids', async () => {
+    const nodes = [
+      { type: 'node', id: 11, lat: 1, lon: 2 },
+      { type: 'node', id: 12, lat: 1, lon: 2.0001 },
+      { type: 'node', id: 13, lat: 1.0001, lon: 2.0001 },
+      { type: 'node', id: 14, lat: 1.0001, lon: 2 },
+    ];
+    const way = { type: 'way', id: 7, nodes: [11, 12, 13, 14, 11], tags: { building: 'yes', name: 'Shed' } };
+    const fetchImpl: typeof fetch = async (input) => {
+      const path = String(input);
+      const elements = path.includes('/relations.json') ? [] : [...nodes, way];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    };
+    const hit = { label: 'Shed', latitude: 1.00005, longitude: 2.00005, osmType: 'way' as const, osmId: 7 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.id).toBe('way/7');
+    expect(building.parts[0]?.outer).toHaveLength(4);
+  });
+
+  it('finds the building of parts around a click, from the map data near it', async () => {
+    const base = ring(43.6424, -79.3873, 0.0004, 0.0005);
+    const shaft = ring(43.6425, -79.3871, 0.0001, 0.0001);
+    const relation = {
+      type: 'relation',
+      id: 14629176,
+      tags: { type: 'building', name: 'CN Tower' },
+      members: [
+        { type: 'way', ref: 1, role: 'outline' },
+        { type: 'way', ref: 2, role: 'part' },
+      ],
+    };
+    const outline = { type: 'way', id: 1, tags: { building: 'yes', 'building:part': 'no', height: '553' }, geometry: base };
+    const part = { type: 'way', id: 2, tags: { 'building:part': 'yes', height: '440' }, geometry: shaft };
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const path = String(input);
+      asked.push(path.replace(/^.*\/api\/osm/, ''));
+      // The map box lists the relation but only the members inside the box.
+      const elements = path.includes('/map.json') ? [relation, outline] : [relation, outline, part];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    };
+    const building = await loadWholeBuilding(43.6425, -79.38705, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.id).toBe('relation/14629176');
+    expect(building.parts.map((item) => item.tags?.height)).toEqual(['440']);
+    expect(asked.some((path) => path.startsWith('/relation/14629176/full.json'))).toBe(true);
+  });
+
+  it('gathers loose parts inside an outline, as the Eiffel Tower is mapped', async () => {
+    const legs = ring(48.8577, 2.2938, 0.0011, 0.0016);
+    const outline = { type: 'way', id: 5013364, tags: { building: 'tower', 'building:part': 'no', height: '330', name: 'Tour Eiffel' }, geometry: legs };
+    const floor = { type: 'way', id: 1, tags: { 'building:part': 'yes', height: '64', min_height: '57.63' }, geometry: ring(48.8580, 2.2943, 0.0003, 0.0004) };
+    const antenna = { type: 'way', id: 2, tags: { 'building:part': 'yes', height: '330', min_height: '300' }, geometry: ring(48.85825, 2.29448, 0.00002, 0.00003) };
+    const outside = { type: 'way', id: 3, tags: { 'building:part': 'yes', height: '3' }, geometry: ring(48.8600, 2.2990, 0.0001, 0.0001) };
+    const fetchImpl: typeof fetch = async (input) => {
+      const path = String(input);
+      const elements = path.includes('/relations.json') ? [] : path.includes('/map.json') ? [outline, floor, antenna, outside] : [outline];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    };
+    const hit = { label: 'Eiffel Tower', latitude: 48.85826, longitude: 2.2945, osmType: 'way' as const, osmId: 5013364 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.label).toBe('Tour Eiffel');
+    expect(building.parts.map((part) => part.tags?.height)).toEqual(['64', '330']);
+  });
+
+  it('keeps the outline when its loose parts stop far short of it, as the Calgary Tower is mapped', async () => {
+    const outline = { type: 'way', id: 25719793, tags: { building: 'yes', height: '191', name: 'Calgary Tower' }, geometry: ring(51.0441, -114.0634, 0.0003, 0.0005) };
+    const base = { type: 'way', id: 1, tags: { 'building:part': 'yes', 'building:levels': '3' }, geometry: ring(51.04425, -114.0632, 0.0001, 0.0001) };
+    const fetchImpl: typeof fetch = async (input) => {
+      const path = String(input);
+      const elements = path.includes('/relations.json') ? [] : path.includes('/map.json') ? [outline, base] : [outline];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    };
+    const hit = { label: 'Calgary Tower', latitude: 51.0443, longitude: -114.0631, osmType: 'way' as const, osmId: 25719793 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.parts.map((part) => part.tags?.height ?? part.tags?.['building:levels'])).toEqual(['191', '3']);
   });
 
   it('leaves out an outline that only stands in for the parts', () => {

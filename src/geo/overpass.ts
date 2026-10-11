@@ -2,6 +2,7 @@ import type { LookupCache } from './cache.ts';
 import { GeoFailure, type GeocodeHit } from './geocode.ts';
 import { projectToLocal } from './projection.ts';
 import type { GeographicBuilding, GeographicRing } from '../house/assemble.ts';
+import { parseLengthMeters } from '../house/heightEstimate.ts';
 import { pointInRing } from '../house/planGeometry.ts';
 import type { LngLat } from './projection.ts';
 import { sendRequest } from './request.ts';
@@ -22,29 +23,38 @@ interface OsmPoint {
   lon: number;
 }
 
+/** An OSM element as Overpass returns it with `out geom`. Main API answers are converted to this shape. */
 interface OverpassElement {
   type: string;
   id: number;
   tags?: Record<string, string>;
   geometry?: OsmPoint[];
+  /** Main API ways list node ids instead of geometry. */
+  nodes?: number[];
+  lat?: number;
+  lon?: number;
   members?: { type: string; ref?: number; role?: string; geometry?: OsmPoint[] }[];
 }
 
+/** Where a lookup goes: an Overpass query, or a path on the main OpenStreetMap API. */
+type Source = { overpass: string } | { osm: string };
+
 const ENDPOINT = sameOrigin('/api/overpass');
 const AROUND_M = 45;
+/** Half-width of the map box read around a click, so the walls of a large building are inside it. */
+const MIN_POINT_REACH_M = 60;
+const MAX_POINT_REACH_M = 300;
 
-/** Load the building for a geocoder hit. Uses the cache on a repeated lookup. */
+/**
+ * Load the building for a geocoder hit. Single buildings come from the main OpenStreetMap API,
+ * which answers reliably; the public Overpass server is often busy for minutes at a time.
+ */
 export async function loadBuilding(hit: GeocodeHit, deps: OverpassDeps): Promise<GeographicBuilding> {
   if (hit.osmType === 'way' || hit.osmType === 'relation') {
-    const direct = await fetchElements(elementQuery(hit.osmType, hit.osmId), `overpass:${hit.osmType}:${hit.osmId}:parts`, deps);
-    // A search can land on the outline of a building drawn in parts, like the CN Tower.
-    // The parts are the building; the outline alone is a solid column.
-    const whole = partsBuildingIn(direct);
-    if (whole !== null) return whole;
-    const building = buildingFromElements(direct, hit.label);
+    const building = await loadOsmElement(hit.osmType, hit.osmId, hit.label, deps);
     if (building !== null) return building;
   }
-  const around = await fetchElements(aroundQuery(hit.latitude, hit.longitude), aroundKey(hit), deps);
+  const around = await fetchElements({ overpass: aroundQuery(hit.latitude, hit.longitude) }, aroundKey(hit), deps);
   const chosen = chooseBuilding(around, hit.latitude, hit.longitude, hit.label);
   if (chosen === null) {
     throw new GeoFailure('not-found', 'No building footprint was found there. Search a street address, not only a city.');
@@ -52,15 +62,174 @@ export async function loadBuilding(hit: GeocodeHit, deps: OverpassDeps): Promise
   return chosen;
 }
 
-/** The building whose footprint contains this point. A nearby neighbor is not returned. */
-export async function loadBuildingUnder(latitude: number, longitude: number, deps: OverpassDeps): Promise<GeographicBuilding> {
-  const around = await fetchElements(aroundQuery(latitude, longitude), aroundKey({ latitude, longitude, label: '', osmType: 'node', osmId: 0 }), deps);
-  const buildings = around.flatMap((element) => toBuildings(element, element.tags?.name ?? 'Building'));
-  const containing = buildings.find((building) => buildingContains(building, latitude, longitude));
-  if (containing === undefined) {
-    throw new GeoFailure('not-found', 'Click on a building. A click between houses does not select a neighbor.');
+/**
+ * A way or relation by id, as a whole building. A search can land on the outline of a building
+ * drawn in parts, like the CN Tower; the parts are the building, and the outline alone is a solid column.
+ */
+async function loadOsmElement(
+  osmType: 'way' | 'relation',
+  osmId: number,
+  label: string,
+  deps: OverpassDeps,
+): Promise<GeographicBuilding | null> {
+  const parents = await fetchElements({ osm: `/${osmType}/${osmId}/relations.json` }, `osm:${osmType}:${osmId}:relations`, deps);
+  const parent = parents.find((element) => element.type === 'relation' && element.tags?.type === 'building');
+  if (parent !== undefined) {
+    const building = partsBuildingIn(await fetchRelation(parent.id, deps));
+    if (building !== null) return building;
   }
-  return containing;
+  const path = osmType === 'way' ? `/way/${osmId}/full.json` : `/relation/${osmId}/full.json`;
+  const own = await fetchElements({ osm: path }, `osm:${osmType}:${osmId}:full`, deps);
+  const whole = partsBuildingIn(own);
+  if (whole !== null) return whole;
+  const building = buildingFromElements(own.filter((element) => element.type === osmType && element.id === osmId), label);
+  return building === null ? null : withLooseParts(building, deps);
+}
+
+function fetchRelation(id: number, deps: OverpassDeps): Promise<OverpassElement[]> {
+  return fetchElements({ osm: `/relation/${id}/full.json` }, `osm:relation:${id}:full`, deps);
+}
+
+/**
+ * The building containing a point: its building relation when it has one, else the smallest
+ * building outline around the point. Reads the main API's map data for a box around the point.
+ */
+async function loadOsmBuildingAt(
+  latitude: number,
+  longitude: number,
+  reachM: number,
+  deps: OverpassDeps,
+  probes: readonly LngLat[] = [],
+): Promise<GeographicBuilding | null> {
+  const reach = Math.min(MAX_POINT_REACH_M, Math.max(MIN_POINT_REACH_M, Math.ceil(reachM)));
+  const dLat = reach / 111_320;
+  const dLon = reach / (111_320 * Math.max(Math.cos((latitude * Math.PI) / 180), 0.01));
+  const box = [longitude - dLon, latitude - dLat, longitude + dLon, latitude + dLat].map((value) => value.toFixed(6)).join(',');
+  const area = await fetchElements({ osm: `/map.json?bbox=${box}` }, `osm:map:${box}`, deps);
+  // The point, plus any extra points known to be on the building, such as the corners of the
+  // map piece that was clicked. A piece at the edge of a landmark can have its centre just outside.
+  const points = [{ latitude, longitude }, ...probes];
+  const score = (footprint: GeographicBuilding) =>
+    points.filter((point) => buildingContains(footprint, point.latitude, point.longitude)).length;
+  // Relations in a map box are listed without the members outside it, so each is loaded whole.
+  const relations = area
+    .filter((element) => element.type === 'relation' && (element.tags?.type === 'building' || element.tags?.building !== undefined))
+    .slice(0, 4);
+  const candidates: { building: GeographicBuilding; hits: number; area: number; relation: boolean }[] = [];
+  const consider = (building: GeographicBuilding, footprint: GeographicBuilding, relation: boolean) => {
+    const hits = score(footprint);
+    if (hits > 0) candidates.push({ building, hits, area: buildingArea(footprint), relation });
+  };
+  for (const relation of relations) {
+    const full = await fetchRelation(relation.id, deps);
+    const element = full.find((item) => item.type === 'relation' && item.id === relation.id);
+    if (element === undefined) continue;
+    const ways = waysOf(full);
+    const building = element.tags?.type === 'building' ? relationBuilding(element, ways) : toBuildings(element, element.tags?.name ?? 'Building')[0] ?? null;
+    const footprint = element.tags?.type === 'building' ? relationBuilding(element, ways, true) : building;
+    if (building !== null && footprint !== null) consider(building, footprint, true);
+  }
+  for (const element of area) {
+    // Parts are gathered from the building's outline afterwards. On their own, a tower's
+    // antenna would win as the smallest outline around a click at its centre.
+    if (element.type !== 'way' || element.tags?.building === undefined) continue;
+    for (const building of toBuildings(element, element.tags?.name ?? 'Building')) consider(building, building, false);
+  }
+  // Most points inside wins. On a tie a building relation beats its own outline, then the smaller one wins.
+  candidates.sort((a, b) => b.hits - a.hits || Number(b.relation) - Number(a.relation) || a.area - b.area);
+  const chosen = candidates[0];
+  if (chosen === undefined) return null;
+  return chosen.relation ? chosen.building : withLooseParts(chosen.building, deps);
+}
+
+/** An outline wider than this is not searched for loose parts: the map read would be too large. */
+const MAX_LOOSE_PARTS_SPAN_M = 600;
+
+/**
+ * Building parts drawn inside an outline belong to it even without a building relation, by the
+ * OSM 3D convention. The Eiffel Tower is mapped this way: a 330 m outline of its four legs, and
+ * some twenty separate parts for the legs, floors, and antenna. When parts are found, they are
+ * the building and the outline is left out.
+ */
+async function withLooseParts(building: GeographicBuilding, deps: OverpassDeps): Promise<GeographicBuilding> {
+  const outline = building.parts[0]?.outer;
+  if (building.parts.length !== 1 || outline === undefined || outline.length < 3) return building;
+  if (isPart(building.tags['building:part'])) return building;
+  let south = Infinity;
+  let west = Infinity;
+  let north = -Infinity;
+  let east = -Infinity;
+  for (const point of outline) {
+    south = Math.min(south, point.latitude);
+    north = Math.max(north, point.latitude);
+    west = Math.min(west, point.longitude);
+    east = Math.max(east, point.longitude);
+  }
+  const span = Math.max(metersNorth(north - south), metersEast(east - west, (south + north) / 2));
+  if (span > MAX_LOOSE_PARTS_SPAN_M) return building;
+  const box = [west, south, east, north].map((value) => value.toFixed(6)).join(',');
+  let elements: OverpassElement[];
+  try {
+    elements = await fetchElements({ osm: `/map.json?bbox=${box}` }, `osm:map:${box}`, deps);
+  } catch {
+    // The outline alone is still a usable building.
+    return building;
+  }
+  const parts: GeographicRing[] = [];
+  for (const element of elements) {
+    if (element.type !== 'way' && element.type !== 'relation') continue;
+    if (!isPart(element.tags?.['building:part'])) continue;
+    for (const piece of toBuildings(element, 'Part')) {
+      for (const ring of piece.parts) {
+        if (insideOutline(ring.outer, outline)) parts.push({ ...ring, tags: piece.tags });
+      }
+    }
+  }
+  if (parts.length === 0) return building;
+  // Parts that stop well short of the outline's height are an unfinished mapping, like the
+  // Calgary Tower: a 191 m outline with only its 9 m base drawn as a part. Keep the outline then.
+  const outlineTop = tagHeight(building.tags);
+  const partsTop = Math.max(0, ...parts.map((part) => tagHeight(part.tags ?? {}) ?? 0));
+  if (outlineTop !== undefined && partsTop < outlineTop * 0.8) {
+    const own = building.parts[0];
+    if (own !== undefined) return { ...building, parts: [{ ...own, tags: building.tags }, ...parts] };
+  }
+  return { ...building, parts };
+}
+
+/** Height to the top from OSM tags: `height`, else 3 m per level. */
+function tagHeight(tags: Record<string, string>): number | undefined {
+  const height = parseLengthMeters(tags.height);
+  if (height !== undefined) return height;
+  const levels = Number(tags['building:levels']);
+  return Number.isFinite(levels) && levels > 0 ? levels * 3 : undefined;
+}
+
+/**
+ * A part belongs to the outline when its centre is inside, or most of its corners are. A sloped
+ * leg that arches over open ground, like the Eiffel Tower's lowest stage, has its centre in the arch.
+ */
+function insideOutline(ring: LngLat[], outline: LngLat[]): boolean {
+  const center = ringCenter(ring);
+  if (center !== null && ringContains(outline, center)) return true;
+  const inside = ring.filter((point) => ringContains(outline, point)).length;
+  return inside * 2 > ring.length;
+}
+
+function ringCenter(ring: readonly LngLat[]): LngLat | null {
+  if (ring.length === 0) return null;
+  return {
+    latitude: ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length,
+    longitude: ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length,
+  };
+}
+
+function waysOf(elements: OverpassElement[]): Map<number, OverpassElement> {
+  const ways = new Map<number, OverpassElement>();
+  for (const element of elements) {
+    if (element.type === 'way') ways.set(element.id, element);
+  }
+  return ways;
 }
 
 export function buildingContains(building: GeographicBuilding, latitude: number, longitude: number): boolean {
@@ -103,21 +272,19 @@ export function chooseBuilding(
 /**
  * The building relation that contains this point, including every outline and part.
  * A single way is used when the point is not inside a building relation.
- * `wayReachM` also fetches building ways whose outline passes within that distance, so a
- * large building drawn as one way, like a pyramid, arrives with its height and roof tags.
+ * `wayReachM` is how far the building's walls may be from the point, so a large building drawn
+ * as one way, like a pyramid, is still found from a click near its middle.
  */
 export async function loadWholeBuilding(
   latitude: number,
   longitude: number,
   deps: OverpassDeps,
   wayReachM = 0,
+  probes: readonly LngLat[] = [],
 ): Promise<GeographicBuilding> {
-  const reach = Math.min(300, Math.ceil(wayReachM));
-  const key = `overpass:whole:${latitude.toFixed(5)}:${longitude.toFixed(5)}${reach > 0 ? `:${reach}` : ''}`;
-  const elements = await fetchElements(wholeBuildingQuery(latitude, longitude, reach), key, deps);
-  const building = wholeBuildingFromElements(elements, latitude, longitude);
+  const building = await loadOsmBuildingAt(latitude, longitude, wayReachM, deps, probes);
   if (building === null) {
-    throw new GeoFailure('not-found', 'No building footprint was found at the starting place.');
+    throw new GeoFailure('not-found', 'No building footprint was found at that place.');
   }
   return building;
 }
@@ -128,10 +295,7 @@ export function wholeBuildingFromElements(
   latitude: number,
   longitude: number,
 ): GeographicBuilding | null {
-  const ways = new Map<number, OverpassElement>();
-  for (const element of elements) {
-    if (element.type === 'way') ways.set(element.id, element);
-  }
+  const ways = waysOf(elements);
   let best: { building: GeographicBuilding; area: number } | null = null;
   for (const element of elements) {
     if (element.type !== 'relation' || element.tags?.type !== 'building') continue;
@@ -171,32 +335,31 @@ function relationBuilding(
   if (parts.length === 0) return null;
   return {
     id: `relation/${relation.id}`,
-    label: relation.tags?.name ?? 'Building',
+    // Some relations, like the Burj Khalifa's, leave the name on the outline.
+    label: relation.tags?.name ?? outlineName(relation, ways) ?? 'Building',
     tags: relation.tags ?? {},
     parts,
     provenance: { source: 'osm', confidence: 0.8, note: `relation ${relation.id}` },
   };
 }
 
+function outlineName(relation: OverpassElement, ways: Map<number, OverpassElement>): string | undefined {
+  const outline = relation.members?.find((member) => member.role === 'outline' && member.ref !== undefined);
+  return outline?.ref === undefined ? undefined : ways.get(outline.ref)?.tags?.name;
+}
+
 function isPart(value: string | undefined): boolean {
   return value !== undefined && value !== '' && value !== 'no';
 }
 
-function wholeBuildingQuery(latitude: number, longitude: number, wayReachM: number): string {
-  const relations = `relation["type"="building"](around:80,${latitude},${longitude});(._;>;)`;
-  if (wayReachM <= 0) return `[out:json][timeout:25];${relations};out geom;`;
-  // `around` measures to a way's outline, not its interior, so the reach must cover the walls.
-  return `[out:json][timeout:25];${relations}->.whole;way["building"](around:${wayReachM},${latitude},${longitude})->.single;(.whole;.single;);out geom;`;
-}
-
-async function fetchElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
+async function fetchElements(source: Source, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
   // The cache only saves a trip. A broken or full browser store must not fail the lookup.
   const cached = await deps.cache.get(cacheKey).catch(() => undefined);
   if (cached !== undefined) return parseElements(cached);
   const delays = deps.retryDelaysMs ?? RETRY_DELAYS_MS;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await requestElements(query, cacheKey, deps);
+      return await requestElements(source, cacheKey, deps);
     } catch (error) {
       const delay = delays[attempt];
       const busy = error instanceof GeoFailure && error.kind === 'timeout' && deps.signal?.aborted !== true;
@@ -206,22 +369,28 @@ async function fetchElements(query: string, cacheKey: string, deps: OverpassDeps
   }
 }
 
-async function requestElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
+async function requestElements(source: Source, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
   let response: Response;
   try {
-    response = await sendRequest(deps.fetch, ENDPOINT, {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-      body: new URLSearchParams({ data: query }),
-      signal: deps.signal,
-    });
+    response =
+      'overpass' in source
+        ? await sendRequest(deps.fetch, ENDPOINT, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+            body: new URLSearchParams({ data: source.overpass }),
+            signal: deps.signal,
+          })
+        : await sendRequest(deps.fetch, sameOrigin(`/api/osm${source.osm}`), {
+            headers: { Accept: 'application/json' },
+            signal: deps.signal,
+          });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new GeoFailure('timeout', 'OpenStreetMap took too long to answer.');
     }
     throw new GeoFailure('network', 'Could not reach OpenStreetMap for the building outline.');
   }
-  if (response.status === 429 || response.status === 504) {
+  if (response.status === 429 || response.status === 503 || response.status === 504) {
     throw new GeoFailure('timeout', 'OpenStreetMap is busy. Wait a moment and try again.');
   }
   if (!response.ok) throw new GeoFailure('network', 'OpenStreetMap could not return the building outline.');
@@ -244,7 +413,34 @@ function parseElements(body: string): OverpassElement[] {
     if (typeof record.remark === 'string') throw new Error(record.remark);
     throw new Error('Not an Overpass response.');
   }
-  return record.elements.filter((item): item is OverpassElement => typeof item === 'object' && item !== null);
+  return withGeometry(record.elements.filter((item): item is OverpassElement => typeof item === 'object' && item !== null));
+}
+
+/** The main API lists a way's node ids and the nodes separately. Give ways and members their coordinates, as Overpass does. */
+function withGeometry(elements: OverpassElement[]): OverpassElement[] {
+  const nodes = new Map<number, OsmPoint>();
+  for (const element of elements) {
+    if (element.type === 'node' && element.lat !== undefined && element.lon !== undefined) {
+      nodes.set(element.id, { lat: element.lat, lon: element.lon });
+    }
+  }
+  if (nodes.size === 0) return elements;
+  const ways = new Map<number, OsmPoint[]>();
+  const shaped = elements.map((element) => {
+    if (element.type !== 'way' || element.geometry !== undefined || element.nodes === undefined) return element;
+    const geometry = element.nodes.map((id) => nodes.get(id)).filter((point): point is OsmPoint => point !== undefined);
+    ways.set(element.id, geometry);
+    return { ...element, geometry };
+  });
+  return shaped.map((element) => {
+    if (element.type !== 'relation' || element.members === undefined) return element;
+    const members = element.members.map((member) =>
+      member.geometry === undefined && member.type === 'way' && member.ref !== undefined && ways.has(member.ref)
+        ? { ...member, geometry: ways.get(member.ref) }
+        : member,
+    );
+    return { ...element, members };
+  });
 }
 
 function toBuildings(element: OverpassElement, label: string): GeographicBuilding[] {
@@ -380,7 +576,7 @@ export async function loadBuildingsInBounds(bounds: MapBounds, deps: OverpassDep
     throw new GeoFailure('not-found', 'That box is too big. Zoom in and shift-drag across a few blocks.');
   }
   const key = `overpass:bbox:${bounds.south.toFixed(5)}:${bounds.west.toFixed(5)}:${bounds.north.toFixed(5)}:${bounds.east.toFixed(5)}`;
-  const elements = await fetchElements(boundsQuery(bounds), key, deps);
+  const elements = await fetchElements({ overpass: boundsQuery(bounds) }, key, deps);
   const boxArea = Math.abs(width * height);
   const buildings = elements
     .flatMap((element) => toBuildings(element, element.tags?.name ?? 'Building'))
@@ -433,19 +629,10 @@ function boundsQuery(bounds: MapBounds): string {
   return `[out:json][timeout:25];way["building"](${box});out geom;`;
 }
 
-/** The element, plus any building relation it belongs to and that relation's member ways. */
-function elementQuery(osmType: 'way' | 'relation', osmId: number): string {
-  return `[out:json][timeout:25];${osmType}(${osmId})->.hit;rel(b${osmType === 'way' ? 'w' : 'r'}.hit)["type"="building"]->.whole;(.hit;.whole;way(r.whole););out geom;`;
-}
-
 function partsBuildingIn(elements: OverpassElement[]): GeographicBuilding | null {
   const relation = elements.find((element) => element.type === 'relation' && element.tags?.type === 'building');
   if (relation === undefined) return null;
-  const ways = new Map<number, OverpassElement>();
-  for (const element of elements) {
-    if (element.type === 'way') ways.set(element.id, element);
-  }
-  return relationBuilding(relation, ways);
+  return relationBuilding(relation, waysOf(elements));
 }
 
 function aroundQuery(latitude: number, longitude: number): string {
