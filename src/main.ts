@@ -37,7 +37,7 @@ import {
   sunDirection,
   type SunDirection,
 } from './sun/sunPosition.ts';
-import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, zonedLocalToDate } from './sun/zonedTime.ts';
+import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, timeZoneAt, zonedLocalToDate } from './sun/zonedTime.ts';
 import { mountAddressSearch } from './ui/addressSearch.ts';
 import { mountCompass, mountSunBadge } from './ui/compass.ts';
 import { DEFAULT_CLOCK, mountControls } from './ui/controls.ts';
@@ -90,9 +90,18 @@ let model = demoHouseModel();
 let picked: GeographicBuilding[] = [];
 const knownBuildings: GeographicBuilding[] = [];
 let openingDone: Promise<void> = Promise.resolve();
+/** Set once the person selects anything, so the slow opening lookup does not replace their choice. */
+let userSelected = false;
 let viewRadius = 12;
 let searchToken = 0;
 const searchAbort = { current: new AbortController() };
+
+const FIXED_OFFSET_NOTE = 'Time uses a fixed offset from longitude, without daylight saving.';
+
+/** The place's own time zone, so the clock matches local time including daylight saving. */
+function siteAt(origin: { latitude: number; longitude: number }): Omit<Site, 'label'> {
+  return { latitude: origin.latitude, longitude: origin.longitude, timeZone: timeZoneAt(origin.latitude, origin.longitude) };
+}
 
 function solarNoonMinutes(isoDate: string): number {
   if (site.timeZone !== null) {
@@ -145,8 +154,8 @@ try {
     onArea: (bounds) => {
       void runArea(bounds);
     },
-    onBuildings: (buildings, mode) => {
-      applyPicked(buildings, mode);
+    onBuildings: (buildings) => {
+      selectBox(buildings);
     },
     onMove: (center) => {
       releaseDistantSelection(center);
@@ -265,10 +274,7 @@ try {
     const first = parts[0];
     if (first === undefined) return;
     const center = ringCentroid(first.outer);
-    const known = parts
-      .map((part) => ringCentroid(part.outer))
-      .map((point) => knownBuildingAt(point.latitude, point.longitude))
-      .find((building) => building !== undefined);
+    const known = knownBuildingIn(parts);
     const building = known ?? partsToBuilding(parts);
     const index = picked.findIndex(
       (item) => sameBuilding(item, building) || buildingContains(item, center.latitude, center.longitude),
@@ -281,7 +287,7 @@ try {
     picked = picked.filter((item) => !sameBuilding(item, building) && !coveredBy(building, item));
     picked.push(building);
     showPicked('Selected that building.');
-    if (known === undefined) void upgradeSelection(building, ++upgradeToken);
+    if (known === undefined && mayBeRelation(building)) void upgradeSelection(building, ++upgradeToken);
   }
 
   async function upgradeSelection(placeholder: GeographicBuilding, token: number): Promise<void> {
@@ -344,13 +350,16 @@ try {
       if (Math.hypot(step.east, step.north) > 8_000) knownBuildings.splice(index, 1);
     }
     showPicked('Selection cleared.');
-    site = { latitude: center.latitude, longitude: center.longitude, timeZone: null, label: 'Map' };
+    site = { latitude: center.latitude, longitude: center.longitude, timeZone: timeZoneAt(center.latitude, center.longitude), label: 'Map' };
     describeSite('The sun follows the map.');
     address.setMessage('Selection cleared. The map moved away from those buildings.');
     updateSun();
   }
 
   function showPicked(note: string, fly = false): void {
+    userSelected = true;
+    // The dashed outline belongs to an address search, not to whatever is selected now.
+    map.setOsmRing([]);
     if (picked.length === 0) {
       map.setFootprints([]);
       map.setNote('');
@@ -361,8 +370,8 @@ try {
     }
     address.setClearEnabled(true);
     model = assembleBuildings(picked);
-    site = { latitude: model.origin.latitude, longitude: model.origin.longitude, timeZone: null, label: model.label };
-    describeSite(`${model.label}. Time uses a fixed offset from longitude, without daylight saving.`);
+    site = { ...siteAt(model.origin), label: model.label };
+    describeSite(site.timeZone === null ? `${model.label}. ${FIXED_OFFSET_NOTE}` : model.label);
     showHouse(model, { syncMap: true, fly, demo: false, announce: false });
     const count = picked.length === 1 ? '1 building' : `${picked.length} buildings`;
     const message = `${count}. ${note} Double-click a building here to remove it, or hover it and press Delete.`;
@@ -385,28 +394,9 @@ try {
     }
   }
 
-  function applyPicked(buildings: PickedFootprint[], mode: 'replace' | 'toggle'): void {
-    void resolvePicked(buildings, mode);
-  }
-
-  async function resolvePicked(buildings: PickedFootprint[], mode: 'replace' | 'toggle'): Promise<void> {
-    await openingDone;
-    const next = uniqueBuildings(buildings.map(resolveFootprint));
-    if (mode === 'replace') {
-      picked = next;
-      showPicked(picked.length === 1 ? 'Selected that building.' : 'Selected the buildings in the box.', true);
-      return;
-    }
-    let added = false;
-    for (const building of next) {
-      const index = picked.findIndex((item) => sameBuilding(item, building));
-      if (index >= 0) picked.splice(index, 1);
-      else {
-        picked.push(building);
-        added = true;
-      }
-    }
-    showPicked(added ? 'Added that building.' : 'Removed that building.');
+  function selectBox(buildings: PickedFootprint[][]): void {
+    picked = uniqueBuildings(buildings.map((parts) => knownBuildingIn(parts) ?? partsToBuilding(parts)));
+    showPicked(picked.length === 1 ? 'Selected that building.' : 'Selected the buildings in the box.', true);
   }
 
   async function selectOpeningBuilding(): Promise<void> {
@@ -416,6 +406,7 @@ try {
     try {
       const building = await loadWholeBuilding(DEMO_LOCATION.latitude, DEMO_LOCATION.longitude, { fetch, cache });
       rememberBuilding(building);
+      if (userSelected) return;
       picked = [building];
       model = assembleHouse(building);
       site = {
@@ -431,22 +422,24 @@ try {
       address.setMessage(message);
       map.setNote(message);
     } catch (error) {
-      address.setMessage(failureText(error));
+      if (!userSelected) address.setMessage(failureText(error));
     } finally {
       address.setBusy(false);
     }
   }
 
   async function runSelect(hit: { label: string; latitude: number; longitude: number; osmType: 'node' | 'way' | 'relation'; osmId: number }): Promise<void> {
+    userSelected = true;
     address.setBusy(true);
     address.setMessage('Loading the building footprint…');
     map.previewPlace(hit.longitude, hit.latitude);
     try {
       const building = await loadBuilding(hit, { fetch, cache });
+      rememberBuilding(building);
       picked = [building];
       model = assembleHouse(building);
-      site = { latitude: model.origin.latitude, longitude: model.origin.longitude, timeZone: null, label: hit.label };
-      describeSite(`${hit.label}. Time uses a fixed offset from longitude, without daylight saving.`);
+      site = { ...siteAt(model.origin), label: hit.label };
+      describeSite(site.timeZone === null ? `${hit.label}. ${FIXED_OFFSET_NOTE}` : hit.label);
       map.setOsmRing(building.parts[0]?.outer ?? []);
       showHouse(model, { syncMap: true, fly: true, demo: false });
       address.setClearEnabled(true);
@@ -630,9 +623,21 @@ function rememberBuilding(building: GeographicBuilding): void {
   knownBuildings.push(building);
 }
 
-function resolveFootprint(footprint: PickedFootprint): GeographicBuilding {
-  const center = ringCentroid(footprint.outer);
-  return knownBuildingAt(center.latitude, center.longitude) ?? footprintToBuilding(footprint);
+function knownBuildingIn(parts: readonly PickedFootprint[]): GeographicBuilding | undefined {
+  for (const part of parts) {
+    const center = ringCentroid(part.outer);
+    const known = knownBuildingAt(center.latitude, center.longitude);
+    if (known !== undefined) return known;
+  }
+  return undefined;
+}
+
+/**
+ * Only large structures are drawn as building relations. A house-sized outline would spend an
+ * OpenStreetMap lookup on every click and find nothing, so it keeps the map outline.
+ */
+function mayBeRelation(building: GeographicBuilding): boolean {
+  return footprintReach(building) > 40;
 }
 
 function coveredBy(whole: GeographicBuilding, piece: GeographicBuilding): boolean {

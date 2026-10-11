@@ -1,3 +1,5 @@
+import tzLookup from '@photostructure/tz-lookup';
+
 export interface CivilDate {
   year: number;
   month: number;
@@ -113,4 +115,19 @@ function readZonedParts(instant: Date, timeZone: string): ZonedParts {
   }
 
   return { year, month, day, hour, minute, second };
+}
+
+/**
+ * The IANA time zone at a place, such as America/Edmonton for Calgary, so clock times follow
+ * local daylight saving. Null when the place has no zone this browser can use.
+ */
+export function timeZoneAt(latitude: number, longitude: number): string | null {
+  try {
+    const zone = tzLookup(latitude, longitude);
+    // Throws when the browser does not know the zone.
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return zone;
+  } catch {
+    return null;
+  }
 }

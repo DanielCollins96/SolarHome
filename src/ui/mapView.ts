@@ -51,7 +51,8 @@ export function mountMap(
     onPick: (point: LngLat) => void;
     onArea: (bounds: AreaBounds) => void;
     onBuilding: (parts: PickedFootprint[]) => void;
-    onBuildings: (buildings: PickedFootprint[], mode: 'replace' | 'toggle') => void;
+    /** Each entry is one building: the touching outlines that make it up. */
+    onBuildings: (buildings: PickedFootprint[][]) => void;
     onMove: (center: LngLat) => void;
   },
 ): MapController {
@@ -153,7 +154,8 @@ export function mountMap(
   });
 
   map.getCanvas().addEventListener('mousedown', (event) => {
-    if (event.button !== 0 || event.shiftKey || tracing) return;
+    // Ctrl-drag turns the map, so leave it to MapLibre like a right-drag.
+    if (event.button !== 0 || event.shiftKey || event.ctrlKey || tracing) return;
     // Stop the pan before it starts, so a click does not grab and drag the map.
     map.dragPan.disable();
     press = { x: event.offsetX, y: event.offsetY, moved: false };
@@ -240,7 +242,7 @@ export function mountMap(
       return;
     }
     if (visible.length > 0) {
-      options.onBuildings(visible, 'replace');
+      options.onBuildings(visible);
       swallowFollowingClick();
       return;
     }
@@ -474,15 +476,17 @@ function focusOutline(map: MapLibreMap, rings: readonly (readonly LngLat[])[], l
   );
 }
 
-function buildingsInPolygon(map: MapLibreMap, corners: readonly LngLat[]): PickedFootprint[] {
+function buildingsInPolygon(map: MapLibreMap, corners: readonly LngLat[]): PickedFootprint[][] {
   const width = map.getContainer().clientWidth;
   const height = map.getContainer().clientHeight;
   // A tall tower is drawn above its footprint, so a box around the base
   // does not cover the shaft's pixels. Take every rendered building and
   // keep the ones whose footprint sits inside the ground polygon.
-  return footprintsFrom(queryBuildings(map, [[0, 0], [width, height]])).filter((building) =>
-    ringContains(corners, centroid(building.outer)),
-  );
+  // Filter before merging duplicates: the whole screen can hold thousands of outlines.
+  const inside = queryBuildings(map, [[0, 0], [width, height]])
+    .flatMap(featureFootprints)
+    .filter((building) => ringContains(corners, shapeOf(building).center));
+  return groupStructures(footprintsFrom(inside));
 }
 
 /** One side follows the first part of the drag. The opposite corner is the cursor. */
@@ -573,45 +577,105 @@ function boundsOf(corners: readonly LngLat[]): { south: number; west: number; no
 
 /** The piece under the cursor, plus the other pieces of the same structure that touch it. */
 function buildingUnderCursor(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint[] {
+  // One tile feature can hold every house on the block, so pick the outline under the cursor, not the feature's first.
   const direct = footprintsFrom(queryBuildings(map, [point.x, point.y]));
-  const clicked = direct[0] ?? buildingUnderShaft(map, point);
+  const ground = map.unproject([point.x, point.y]);
+  const cursor = { longitude: ground.lng, latitude: ground.lat };
+  const clicked =
+    direct.find((building) => ringContains(building.outer, cursor)) ??
+    shaftUnder(map, point, direct) ??
+    buildingUnderShaft(map, point);
   if (clicked === undefined) return [];
   return partsOfSameStructure(map, clicked);
 }
 
 function partsOfSameStructure(map: MapLibreMap, seed: PickedFootprint): PickedFootprint[] {
-  const origin = centroid(seed.outer);
+  const origin = shapeOf(seed).center;
   const pad = 100 / metersPerPixel(map, origin.latitude);
   const bounds = footprintBounds(map, seed.outer);
   const nearby = footprintsFrom(queryBuildings(map, [
     [bounds.minX - pad, bounds.minY - pad],
     [bounds.maxX + pad, bounds.maxY + pad],
   ]));
+  return growStructure(seed, nearby.filter((item) => !sameFootprint(item, seed)));
+}
+
+/** The seed plus every piece in the pool that reaches it through touching pieces. Taken pieces leave the pool. */
+function growStructure(seed: PickedFootprint, pool: PickedFootprint[]): PickedFootprint[] {
   const group = [seed];
-  const pending = nearby.filter((item) => !sameFootprint(item, seed));
-  let grew = true;
-  while (grew && group.length < 40) {
-    grew = false;
-    for (let index = pending.length - 1; index >= 0; index -= 1) {
-      const candidate = pending[index];
-      if (candidate === undefined || !group.some((part) => sameStructure(part, candidate))) continue;
+  for (let next = 0; next < group.length && group.length < 40; next += 1) {
+    const member = group[next];
+    if (member === undefined) break;
+    for (let index = pool.length - 1; index >= 0; index -= 1) {
+      const candidate = pool[index];
+      if (candidate === undefined || !sameStructure(member, candidate)) continue;
       group.push(candidate);
-      pending.splice(index, 1);
-      grew = true;
+      pool.splice(index, 1);
     }
   }
   return group;
 }
 
+/** Split loose outlines into buildings, so a box selects a house and its attached garage as one, like a click. */
+function groupStructures(footprints: readonly PickedFootprint[]): PickedFootprint[][] {
+  const pool = [...footprints];
+  const groups: PickedFootprint[][] = [];
+  while (pool.length > 0) {
+    const seed = pool.pop();
+    if (seed !== undefined) groups.push(growStructure(seed, pool));
+  }
+  return groups;
+}
+
+interface Shape {
+  center: LngLat;
+  area: number;
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+}
+
+const shapes = new WeakMap<PickedFootprint, Shape>();
+
+/** Centroid, area and bounds, measured once per outline. Grouping compares every pair. */
+function shapeOf(footprint: PickedFootprint): Shape {
+  const known = shapes.get(footprint);
+  if (known !== undefined) return known;
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (const point of footprint.outer) {
+    west = Math.min(west, point.longitude);
+    east = Math.max(east, point.longitude);
+    south = Math.min(south, point.latitude);
+    north = Math.max(north, point.latitude);
+  }
+  const shape = { center: centroid(footprint.outer), area: ringAreaAbs(footprint.outer), west, south, east, north };
+  shapes.set(footprint, shape);
+  return shape;
+}
+
 /** Pieces of one tower touch, or one sits on the other. A block-sized outline does not. */
 function sameStructure(a: PickedFootprint, b: PickedFootprint): boolean {
-  const areaA = ringAreaAbs(a.outer);
-  const areaB = ringAreaAbs(b.outer);
-  const smaller = Math.min(areaA, areaB);
-  const larger = Math.max(areaA, areaB);
+  const shapeA = shapeOf(a);
+  const shapeB = shapeOf(b);
+  // About a metre of slack. Outlines whose bounds do not meet can neither touch nor contain each other.
+  const slack = 0.00001;
+  const slackLng = slack / Math.max(Math.cos((shapeA.center.latitude * Math.PI) / 180), 0.01);
+  if (
+    shapeA.east + slackLng < shapeB.west || shapeB.east + slackLng < shapeA.west ||
+    shapeA.north + slack < shapeB.south || shapeB.north + slack < shapeA.south
+  ) {
+    return false;
+  }
+  const smaller = Math.min(shapeA.area, shapeB.area);
+  const larger = Math.max(shapeA.area, shapeB.area);
   if (larger > Math.max(smaller * 12, 12_000)) return false;
-  if (ringContains(a.outer, centroid(b.outer)) || ringContains(b.outer, centroid(a.outer))) return true;
-  return ringsWithin(a.outer, b.outer, 8);
+  if (ringContains(a.outer, shapeB.center) || ringContains(b.outer, shapeA.center)) return true;
+  // Touching only. Houses a side yard apart are separate buildings, and tiles cut one house into touching pieces.
+  return ringsWithin(a.outer, b.outer, 1);
 }
 
 function ringsWithin(a: readonly LngLat[], b: readonly LngLat[], meters: number): boolean {
@@ -651,6 +715,11 @@ function buildingUnderShaft(map: MapLibreMap, point: { x: number; y: number }): 
     [point.x - 28, point.y],
     [point.x + 28, point.y + reach],
   ]));
+  return shaftUnder(map, point, below);
+}
+
+/** The outline whose walls rise through the cursor: the nearest one below it on screen. */
+function shaftUnder(map: MapLibreMap, point: { x: number; y: number }, below: readonly PickedFootprint[]): PickedFootprint | undefined {
   let best: { building: PickedFootprint; above: number } | undefined;
   for (const building of below) {
     const bounds = footprintBounds(map, building.outer);
@@ -736,21 +805,22 @@ function buildingLayerIds(map: MapLibreMap): string[] {
   return ids;
 }
 
-function footprintsFrom(features: readonly MapGeoJSONFeature[]): PickedFootprint[] {
+/** Merge the copies of one outline: the flat and 3D layers, and neighbouring tiles, each return it. */
+function footprintsFrom(source: readonly MapGeoJSONFeature[] | readonly PickedFootprint[]): PickedFootprint[] {
+  const all = source.flatMap((item) => ('outer' in item ? [item] : featureFootprints(item)));
   const picks: PickedFootprint[] = [];
-  for (const feature of features) {
-    for (const pick of featureFootprints(feature)) {
-      const existing = picks.find((item) => sameFootprint(item, pick));
-      if (existing !== undefined) {
-        if (pick.outer.length > existing.outer.length) {
-          existing.outer = pick.outer;
-          existing.holes = pick.holes;
-          existing.heightM = pick.heightM ?? existing.heightM;
-        }
-        continue;
+  for (const pick of all) {
+    const existing = picks.find((item) => sameFootprint(item, pick));
+    if (existing !== undefined) {
+      if (pick.outer.length > existing.outer.length) {
+        existing.outer = pick.outer;
+        existing.holes = pick.holes;
+        existing.heightM = pick.heightM ?? existing.heightM;
+        shapes.delete(existing);
       }
-      picks.push(pick);
+      continue;
     }
+    picks.push(pick);
   }
   return picks;
 }
@@ -764,9 +834,10 @@ function featureFootprints(feature: MapGeoJSONFeature): PickedFootprint[] {
     return pick === null ? [] : [pick];
   }
   if (feature.geometry.type === 'MultiPolygon') {
+    // The tiles merge whole blocks into one feature, so its id names no single building.
     return feature.geometry.coordinates.flatMap((polygon) => {
       const rings = polygon.map(toRing);
-      const pick = footprintFromRings(id, label, rings, heightM);
+      const pick = footprintFromRings('', label, rings, heightM);
       return pick === null ? [] : [pick];
     });
   }
@@ -781,10 +852,18 @@ function footprintFromRings(id: string, label: string, rings: LngLat[][], height
 }
 
 function sameFootprint(a: PickedFootprint, b: PickedFootprint): boolean {
-  if (a.id !== b.id) return false;
-  const left = centroid(a.outer);
-  const right = centroid(b.outer);
+  // Outlines without a usable id are named by their first corner, which each tile cuts differently.
+  // A matching size stands in for the id, so a tower on its podium is not merged into it.
+  if (a.id !== b.id && !(a.id.startsWith('ring:') && b.id.startsWith('ring:') && similarArea(a, b))) return false;
+  const left = shapeOf(a).center;
+  const right = shapeOf(b).center;
   return Math.abs(left.latitude - right.latitude) < 0.00004 && Math.abs(left.longitude - right.longitude) < 0.00006;
+}
+
+function similarArea(a: PickedFootprint, b: PickedFootprint): boolean {
+  const left = shapeOf(a).area;
+  const right = shapeOf(b).area;
+  return Math.min(left, right) >= Math.max(left, right) * 0.85;
 }
 
 function toRing(coordinates: Position[]): LngLat[] {
@@ -799,7 +878,8 @@ function toRing(coordinates: Position[]): LngLat[] {
 
 function ringId(ring: readonly LngLat[]): string {
   const first = ring[0];
-  return `ring/${first?.longitude.toFixed(5) ?? 0}/${first?.latitude.toFixed(5) ?? 0}/${ring.length}`;
+  // No slashes: other code compares the last path segment of an id.
+  return `ring:${first?.longitude.toFixed(6) ?? 0}:${first?.latitude.toFixed(6) ?? 0}:${ring.length}`;
 }
 
 function readLabel(properties: GeoJsonProperties): string {
