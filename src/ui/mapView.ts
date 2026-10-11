@@ -52,6 +52,7 @@ export function mountMap(
     onArea: (bounds: AreaBounds) => void;
     onBuilding: (parts: PickedFootprint[]) => void;
     onBuildings: (buildings: PickedFootprint[], mode: 'replace' | 'toggle') => void;
+    onMove: (center: LngLat) => void;
   },
 ): MapController {
   const map = new MapLibreMap({
@@ -301,6 +302,10 @@ export function mountMap(
       vertices.push(snapTracePoint(raw, origin, previous, before, osmRing).point);
     }
     publish(true);
+  });
+  map.on('move', () => {
+    const center = map.getCenter();
+    options.onMove({ longitude: center.lng, latitude: center.lat });
   });
   map.on('contextmenu', (event: MapMouseEvent) => {
     event.preventDefault();

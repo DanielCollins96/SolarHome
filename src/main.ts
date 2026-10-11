@@ -148,6 +148,9 @@ try {
     onBuildings: (buildings, mode) => {
       applyPicked(buildings, mode);
     },
+    onMove: (center) => {
+      releaseDistantSelection(center);
+    },
   });
 
   const address = mountAddressSearch(panel.tools, {
@@ -326,6 +329,25 @@ try {
       pickBusy = false;
       address.setBusy(false);
     }
+  }
+
+  /** Drop a selection once the map has left it, so a distant outline does not keep the sun and the 3D view busy. */
+  function releaseDistantSelection(center: { latitude: number; longitude: number }): void {
+    if (picked.length === 0) return;
+    const offset = projectToLocal(center, model.origin);
+    if (Math.hypot(offset.east, offset.north) < 8_000) return;
+    picked = [];
+    for (let index = knownBuildings.length - 1; index >= 0; index -= 1) {
+      const place = knownBuildings[index]?.parts[0]?.outer[0];
+      if (place === undefined) continue;
+      const step = projectToLocal(place, center);
+      if (Math.hypot(step.east, step.north) > 8_000) knownBuildings.splice(index, 1);
+    }
+    showPicked('Selection cleared.');
+    site = { latitude: center.latitude, longitude: center.longitude, timeZone: null, label: 'Map' };
+    describeSite('The sun follows the map.');
+    address.setMessage('Selection cleared. The map moved away from those buildings.');
+    updateSun();
   }
 
   function showPicked(note: string, fly = false): void {
