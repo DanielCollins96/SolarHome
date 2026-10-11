@@ -1,5 +1,5 @@
 import './style.css';
-import { Box3, Group, Line, Mesh, PlaneGeometry, Sprite, Vector3, type Material, type Object3D } from 'three';
+import { Box3, Group, Line, Mesh, MeshLambertMaterial, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
 import { assembleBuildings, assembleHouse, assembleTrace, type GeographicBuilding } from './house/assemble.ts';
 import { demoHouseModel } from './house/demoHouse.ts';
 import { createHouseObject } from './house/houseMesh.ts';
@@ -7,7 +7,7 @@ import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
 import { GeoFailure, searchAddresses } from './geo/geocode.ts';
 import { buildingContains, loadBuilding, loadBuildingsInBounds, loadWholeBuilding } from './geo/overpass.ts';
-import { unprojectRing } from './geo/projection.ts';
+import { projectToLocal, unprojectRing } from './geo/projection.ts';
 import { DEMO_LOCATION } from './scene/demoLocation.ts';
 import { createGround, createGroundGrid } from './scene/groundPlane.ts';
 import { createNeighbourGroup } from './scene/neighbourMesh.ts';
@@ -215,7 +215,12 @@ try {
     scene.add(arrow);
     neighbours.visible = false;
     if (options.syncMap) {
-      map.setFootprints(next.parts.map((part) => unprojectRing(part.footprint, next.origin)));
+      map.setFootprints(
+        next.parts.map((part) => ({
+          ring: unprojectRing(part.footprint, next.origin),
+          heightM: part.eaveHeightM,
+        })),
+      );
     }
     if (options.fly) map.flyTo(next.origin.longitude, next.origin.latitude);
     updateSun();
@@ -282,6 +287,7 @@ try {
       const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache });
       if (token !== upgradeToken || !buildingContains(whole, center.latitude, center.longitude)) return;
       if (!picked.some((item) => sameBuilding(item, placeholder))) return;
+      if (footprintReach(whole) > footprintReach(placeholder) * 6) return;
       rememberBuilding(whole);
       picked = picked.filter((item) => !sameBuilding(item, placeholder) && !coveredBy(whole, item));
       picked.push(whole);
@@ -328,7 +334,7 @@ try {
       map.setNote('');
       replaceHouse(new Group());
       address.setClearEnabled(false);
-      address.setMessage('Nothing selected. Click a building to start, or shift-drag a box.');
+      address.setMessage('Nothing selected. Click a building, or shift-drag a box.');
       return;
     }
     address.setClearEnabled(true);
@@ -337,7 +343,7 @@ try {
     describeSite(`${model.label}. Time uses a fixed offset from longitude, without daylight saving.`);
     showHouse(model, { syncMap: true, fly, demo: false, announce: false });
     const count = picked.length === 1 ? '1 building' : `${picked.length} buildings`;
-    const message = `${count}. ${note} Click another to add it, or click a red one to remove it.`;
+    const message = `${count}. ${note} Double-click a building here to remove it, or hover it and press Delete.`;
     address.setMessage(message);
     map.setNote(message);
   }
@@ -458,6 +464,68 @@ try {
   stage.addEventListener('click', () => {
     if (stage.classList.contains('inset')) showView('plane');
   });
+  const raycaster = new Raycaster();
+  const pointer = new Vector2();
+  let highlighted: Group | null = null;
+  const buildingGroupAt = (event: { clientX: number; clientY: number }): Group | null => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObject(house, true);
+    for (const hit of hits) {
+      let node: Object3D | null = hit.object;
+      while (node !== null) {
+        const id: unknown = node.userData.buildingId;
+        if (typeof id === 'string' && id !== '' && node instanceof Group) return node;
+        node = node.parent;
+      }
+    }
+    return null;
+  };
+  const paintHighlight = (group: Group | null, on: boolean) => {
+    group?.traverse((node) => {
+      if (!(node instanceof Mesh) || !(node.material instanceof MeshLambertMaterial)) return;
+      node.material.emissive.setHex(on ? 0x8a2a2a : 0x000000);
+    });
+  };
+  const highlightBuilding = (group: Group | null) => {
+    if (highlighted === group) return;
+    paintHighlight(highlighted, false);
+    highlighted = group;
+    paintHighlight(highlighted, true);
+    canvas.style.cursor = group === null ? '' : 'pointer';
+  };
+  const removeHighlighted = (group: Group | null) => {
+    const id: unknown = group?.userData.buildingId;
+    if (typeof id !== 'string' || id === '') return;
+    const index = picked.findIndex((building) => building.id === id);
+    if (index < 0) return;
+    highlightBuilding(null);
+    picked.splice(index, 1);
+    showPicked(picked.length === 0 ? 'Selection cleared.' : 'Removed that building.');
+  };
+  canvas.addEventListener('pointermove', (event) => {
+    if (stage.classList.contains('inset')) {
+      highlightBuilding(null);
+      return;
+    }
+    highlightBuilding(buildingGroupAt(event));
+  });
+  canvas.addEventListener('pointerleave', () => highlightBuilding(null));
+  canvas.addEventListener('dblclick', (event) => {
+    if (stage.classList.contains('inset')) return;
+    removeHighlighted(buildingGroupAt(event));
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+    if (stage.classList.contains('inset') || highlighted === null) return;
+    event.preventDefault();
+    removeHighlighted(highlighted);
+  });
   showView('map');
 
   const frame = () => {
@@ -490,6 +558,19 @@ function formatOffset(minutes: number): string {
   const sign = minutes >= 0 ? '+' : '−';
   const absolute = Math.abs(minutes);
   return `${sign}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+}
+
+function footprintReach(building: GeographicBuilding): number {
+  const origin = building.parts[0]?.outer[0];
+  if (origin === undefined) return 0;
+  let reach = 0;
+  for (const part of building.parts) {
+    for (const point of part.outer) {
+      const local = projectToLocal(point, origin);
+      reach = Math.max(reach, Math.hypot(local.east, local.north));
+    }
+  }
+  return reach;
 }
 
 function partsToBuilding(parts: PickedFootprint[]): GeographicBuilding {

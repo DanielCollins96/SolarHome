@@ -59,16 +59,6 @@ body {
   display: none;
 }
 
-#area-box {
-  display: none;
-  position: absolute;
-  z-index: 3;
-  box-sizing: border-box;
-  border: 2px solid #e23d3d;
-  background: rgba(226, 61, 61, 0.18);
-  pointer-events: none;
-}
-
 #map-help {
   position: absolute;
   top: 12px;

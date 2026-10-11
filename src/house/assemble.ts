@@ -51,6 +51,7 @@ export function assembleHouse(building: GeographicBuilding): HouseModel {
     issues.push(...roof.issues);
     return {
       id: `part-${index + 1}`,
+      sourceId: building.id,
       footprint,
       holes,
       eaveHeightM: height.eaveHeightM,
@@ -91,6 +92,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
     issues: string[];
     roofProvenance: Provenance;
     heightProvenance: Provenance;
+    sourceId: string;
   }[] = [];
   for (const building of buildings) {
     for (const part of building.parts) {
@@ -113,6 +115,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
         issues: [...outer.issues, ...holes.flatMap((hole) => hole.issues), ...roof.issues],
         roofProvenance: roof.provenance,
         heightProvenance: height.provenance,
+        sourceId: building.id,
       });
     }
   }
@@ -138,6 +141,7 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
     orientationDeg: 0,
     parts: drafted.map((part, index) => ({
       id: `building-${index + 1}`,
+      sourceId: part.sourceId,
       footprint: shift(part.points, centroid),
       holes: part.holes.map((hole) => shift(hole, centroid)),
       eaveHeightM: part.eaveHeightM,

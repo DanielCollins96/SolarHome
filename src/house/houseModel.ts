@@ -34,6 +34,8 @@ export interface HousePart {
   holes: PlanPoint[][];
   eaveHeightM: number;
   roof: RoofSpec;
+  /** Geographic building this part belongs to, when several buildings share one model. */
+  sourceId?: string;
 }
 
 export interface HouseModel {

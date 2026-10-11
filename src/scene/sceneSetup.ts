@@ -153,6 +153,7 @@ export function createFillLight(): AmbientLight {
 
 /** Move the directional light along the vector toward the sun. Intensity drops to 0 below the horizon. */
 export function frameHouse(camera: PerspectiveCamera, controls: OrbitControls, box: Box3): void {
+  if (box.isEmpty()) return;
   const center = box.getCenter(new Vector3());
   const size = box.getSize(new Vector3());
   const radius = Math.max(size.x, size.y, size.z, 8) / 2;

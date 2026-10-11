@@ -100,15 +100,30 @@ export function buildHouseGeometries(model: HouseModel): BuiltHouse {
 }
 
 export function createHouseObject(model: HouseModel): { group: Group; warnings: string[] } {
-  const built = buildHouseGeometries(model);
   const group = new Group();
   group.name = 'house';
-  group.add(shadedMesh('house-floor', built.floor, FLOOR_COLOR, false));
-  group.add(shadedMesh('house-walls', built.walls, WALL_COLOR, true));
-  group.add(shadedMesh('house-roof', built.roof, ROOF_COLOR, true));
+  const warnings: string[] = [];
+  const buckets = new Map<string, HousePart[]>();
+  for (const part of model.parts) {
+    const key = part.sourceId ?? '';
+    const list = buckets.get(key) ?? [];
+    list.push(part);
+    buckets.set(key, list);
+  }
+  for (const [key, parts] of buckets) {
+    const built = buildHouseGeometries({ ...model, parts });
+    warnings.push(...built.warnings);
+    const piece = new Group();
+    piece.name = 'building';
+    if (key !== '') piece.userData.buildingId = key;
+    piece.add(shadedMesh('house-floor', built.floor, FLOOR_COLOR, false));
+    piece.add(shadedMesh('house-walls', built.walls, WALL_COLOR, true));
+    piece.add(shadedMesh('house-roof', built.roof, ROOF_COLOR, true));
+    group.add(piece);
+  }
   // Positive Y rotation is clockwise viewed from above: plan-north turns toward east.
   group.rotation.y = (model.orientationDeg * Math.PI) / 180;
-  return { group, warnings: built.warnings };
+  return { group, warnings };
 }
 
 export function buildGableHouse(spec: GableHouseSpec): GableHouseGeometry {

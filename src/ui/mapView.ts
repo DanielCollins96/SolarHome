@@ -3,8 +3,8 @@ import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
 import type { GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { projectToLocal, type LngLat } from '../geo/projection.ts';
-import { pointInRing } from '../house/planGeometry.ts';
+import { localToLngLat, projectToLocal, type LngLat } from '../geo/projection.ts';
+import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
@@ -30,7 +30,7 @@ export interface PickedFootprint {
 
 export interface MapController {
   setTrace(ring: LngLat[]): void;
-  setFootprints(rings: LngLat[][]): void;
+  setFootprints(rings: readonly { ring: readonly LngLat[]; heightM: number | null }[]): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -64,14 +64,14 @@ export function mountMap(
   });
   let vertices: LngLat[] = [];
   let footprints: LngLat[][] = [];
+  let footprintHeights: number[] = [];
   let osmRing: LngLat[] = [];
   let tracing = false;
   let dragging: number | null = null;
   let suppressClick = false;
   let boxStart: { x: number; y: number } | null = null;
-  const areaBox = document.createElement('div');
-  areaBox.id = 'area-box';
-  container.append(areaBox);
+  let boxPath: LngLat[] = [];
+  let press: { x: number; y: number; moved: boolean } | null = null;
   const help = mountMapHelp(container);
   const recenter = document.createElement('button');
   recenter.id = 'recenter';
@@ -95,7 +95,20 @@ export function mountMap(
 
   map.on('load', () => {
     map.addSource('osm', { type: 'geojson', data: emptyCollection() });
+    map.addSource('select-box', { type: 'geojson', data: emptyCollection() });
     map.addSource('trace', { type: 'geojson', data: emptyCollection() });
+    map.addLayer({
+      id: 'select-box-fill',
+      type: 'fill',
+      source: 'select-box',
+      paint: { 'fill-color': '#e23d3d', 'fill-opacity': 0.22 },
+    });
+    map.addLayer({
+      id: 'select-box-line',
+      type: 'line',
+      source: 'select-box',
+      paint: { 'line-color': '#e23d3d', 'line-width': 3 },
+    });
     map.addLayer({
       id: 'osm-line',
       type: 'line',
@@ -107,7 +120,19 @@ export function mountMap(
       type: 'fill',
       source: 'trace',
       filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: { 'fill-color': '#e23d3d', 'fill-opacity': 0.5 },
+      paint: { 'fill-color': '#e23d3d', 'fill-opacity': 0.45 },
+    });
+    map.addLayer({
+      id: 'trace-volume',
+      type: 'fill-extrusion',
+      source: 'trace',
+      filter: ['==', ['geometry-type'], 'Polygon'],
+      paint: {
+        'fill-extrusion-color': '#e23d3d',
+        'fill-extrusion-opacity': 0.78,
+        'fill-extrusion-height': ['+', ['coalesce', ['get', 'height'], 8], 1.2],
+        'fill-extrusion-base': 0,
+      },
     });
     map.addLayer({
       id: 'trace-line',
@@ -126,11 +151,19 @@ export function mountMap(
     publish(false);
   });
 
+  map.getCanvas().addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.shiftKey || tracing) return;
+    // Stop the pan before it starts, so a click does not grab and drag the map.
+    map.dragPan.disable();
+    press = { x: event.offsetX, y: event.offsetY, moved: false };
+  }, true);
   map.on('mousedown', (event: MapMouseEvent) => {
     if (event.originalEvent.shiftKey && !tracing) {
+      press = null;
       boxStart = { x: event.point.x, y: event.point.y };
+      boxPath = [toLngLat(event)];
       map.dragPan.disable();
-      placeAreaBox(areaBox, boxStart, boxStart);
+      showGroundShape(map, null, boxPath);
       event.preventDefault();
       return;
     }
@@ -144,7 +177,21 @@ export function mountMap(
   });
   map.on('mousemove', (event: MapMouseEvent) => {
     if (boxStart !== null) {
-      placeAreaBox(areaBox, boxStart, { x: event.point.x, y: event.point.y });
+      const place = toLngLat(event);
+      rememberDragPoint(boxPath, place);
+      const preview = pathWithCurrent(boxPath, place);
+      showGroundShape(map, cursorBox(preview), [preview[0] ?? place, place]);
+      return;
+    }
+    if (press !== null) {
+      const dx = event.point.x - press.x;
+      const dy = event.point.y - press.y;
+      if (!press.moved) {
+        if (Math.hypot(dx, dy) < 5) return;
+        press.moved = true;
+      }
+      map.panBy([-dx, -dy], { animate: false });
+      press = { x: event.point.x, y: event.point.y, moved: true };
       return;
     }
     if (dragging === null) return;
@@ -171,32 +218,33 @@ export function mountMap(
     boxStart = null;
     map.dragPan.enable();
     if (start === null) return;
+    const projected = map.unproject([point.x, point.y]);
+    const place = { longitude: projected.lng, latitude: projected.lat };
     if (Math.hypot(point.x - start.x, point.y - start.y) < 12) {
-      areaBox.style.display = 'none';
+      hideGroundBox(map);
       return;
     }
-    const visible = buildingsInRect(map, start, point);
-    if (visible.length > 25) {
-      areaBox.style.display = 'none';
-      help.setNote('Zoom in and drag a smaller box. That area has too many houses.');
+    rememberDragPoint(boxPath, place);
+    const corners = cursorBox(pathWithCurrent(boxPath, place));
+    hideGroundBox(map);
+    if (corners === null) {
+      help.setNote('Drag out one side, then move sideways. The opposite corner stays on the cursor.');
+      swallowFollowingClick();
+      return;
+    }
+    const visible = buildingsInPolygon(map, corners);
+    if (visible.length > 40) {
+      help.setNote(`Zoom in and drag a smaller box. That area has ${visible.length} buildings.`);
       swallowFollowingClick();
       return;
     }
     if (visible.length > 0) {
-      areaBox.style.display = 'none';
       options.onBuildings(visible, 'replace');
       swallowFollowingClick();
       return;
     }
     help.setNote('Loading buildings…');
-    const first = map.unproject([start.x, start.y]);
-    const second = map.unproject([point.x, point.y]);
-    options.onArea({
-      south: Math.min(first.lat, second.lat),
-      north: Math.max(first.lat, second.lat),
-      west: Math.min(first.lng, second.lng),
-      east: Math.max(first.lng, second.lng),
-    });
+    options.onArea(boundsOf(corners));
     swallowFollowingClick();
   };
   let swallowClick = false;
@@ -206,9 +254,27 @@ export function mountMap(
       swallowClick = false;
     }, 0);
   };
+  const releasePress = () => {
+    const current = press;
+    press = null;
+    map.dragPan.enable();
+    if (current === null || current.moved || tracing) return;
+    const parts = buildingUnderCursor(map, { x: current.x, y: current.y });
+    if (parts.length === 0) return;
+    options.onBuilding(parts);
+    swallowFollowingClick();
+  };
   map.on('mouseup', (event: MapMouseEvent) => {
     if (boxStart !== null) finishBox(event.point);
+    releasePress();
     endDrag();
+  });
+  window.addEventListener('mouseup', (event) => {
+    if (boxStart !== null) {
+      const rect = map.getCanvas().getBoundingClientRect();
+      finishBox({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+    }
+    if (press !== null) releasePress();
   });
   map.on('mouseout', endDrag);
   map.on('click', (event: MapMouseEvent) => {
@@ -216,11 +282,7 @@ export function mountMap(
       if (suppressClick || swallowClick) {
         suppressClick = false;
         swallowClick = false;
-        return;
       }
-      const parts = buildingUnderCursor(map, event.point);
-      if (parts.length > 0) options.onBuilding(parts);
-      else options.onPick(toLngLat(event));
       return;
     }
     if (suppressClick) {
@@ -254,7 +316,9 @@ export function mountMap(
     const trace = map.getSource('trace');
     const osm = map.getSource('osm');
     if (tracing) footprints = vertices.length >= 3 ? [vertices.map((point) => ({ ...point }))] : footprints;
-    if (trace && 'setData' in trace) (trace as GeoJSONSource).setData(footprintCollection(footprints, tracing ? vertices : []));
+    if (trace && 'setData' in trace) {
+      (trace as GeoJSONSource).setData(footprintCollection(footprints, tracing ? vertices : [], footprintHeights));
+    }
     if (osm && 'setData' in osm) (osm as GeoJSONSource).setData(lineCollection(osmRing));
     if (emit) options.onTrace(vertices.map((point) => ({ ...point })));
     help.setStatus(footprints.length, tracing ? vertices.length : (footprints[0]?.length ?? 0), tracing);
@@ -267,7 +331,9 @@ export function mountMap(
       publish(false);
     },
     setFootprints(rings) {
-      footprints = rings.filter((ring) => ring.length >= 3).map((ring) => ring.map((point) => ({ ...point })));
+      const kept = rings.filter((entry) => entry.ring.length >= 3);
+      footprints = kept.map((entry) => entry.ring.map((point) => ({ ...point })));
+      footprintHeights = kept.map((entry) => (entry.heightM !== null && entry.heightM > 0 ? entry.heightM : 8));
       vertices = footprints.length === 1 ? (footprints[0]?.map((point) => ({ ...point })) ?? []) : [];
       publish(false);
     },
@@ -291,7 +357,7 @@ export function mountMap(
       help.setNote(note);
     },
     clearSelectionBox() {
-      areaBox.style.display = 'none';
+      hideGroundBox(map);
     },
     flyTo(longitude, latitude) {
       focusOutline(map, footprints.length > 0 ? footprints : [vertices], longitude, latitude);
@@ -326,7 +392,8 @@ function mountMapHelp(container: HTMLElement): {
       <summary>How to use the map</summary>
       <ul>
         <li>Click a gray building to add it. Click a red one to remove it.</li>
-        <li>Hold <strong>Shift</strong> and drag a box to select the buildings in that block.</li>
+        <li>In the 3D view, double-click a building to remove it. Hover one and press Delete to do the same.</li>
+        <li>Hold <strong>Shift</strong> and drag. The first direction is one side, and the opposite corner stays on the cursor.</li>
         <li>Left-drag to move. Right-drag to turn. Scroll to zoom. The target button returns to the selected outlines.</li>
       </ul>
     </details>
@@ -349,7 +416,7 @@ function mountMapHelp(container: HTMLElement): {
         summary.textContent = `1 building. Click another to add it, or click this one to remove it.`;
         return;
       }
-      summary.textContent = 'Click buildings to select them. Shift-drag selects a whole block.';
+      summary.textContent = 'Click buildings to select them. Shift-drag; the opposite corner stays on the cursor.';
     },
     setNote(text) {
       if (note !== null) note.textContent = text;
@@ -402,63 +469,213 @@ function focusOutline(map: MapLibreMap, rings: readonly (readonly LngLat[])[], l
   );
 }
 
-function buildingsInRect(
-  map: MapLibreMap,
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-): PickedFootprint[] {
-  const first = map.unproject([start.x, start.y]);
-  const second = map.unproject([end.x, end.y]);
-  const south = Math.min(first.lat, second.lat);
-  const north = Math.max(first.lat, second.lat);
-  const west = Math.min(first.lng, second.lng);
-  const east = Math.max(first.lng, second.lng);
-  return footprintsFrom(
-    queryBuildings(map, [
-      [start.x, start.y],
-      [end.x, end.y],
-    ]),
-  ).filter((building) => centerInside(building.outer, south, west, north, east));
+function buildingsInPolygon(map: MapLibreMap, corners: readonly LngLat[]): PickedFootprint[] {
+  const width = map.getContainer().clientWidth;
+  const height = map.getContainer().clientHeight;
+  // A tall tower is drawn above its footprint, so a box around the base
+  // does not cover the shaft's pixels. Take every rendered building and
+  // keep the ones whose footprint sits inside the ground polygon.
+  return footprintsFrom(queryBuildings(map, [[0, 0], [width, height]])).filter((building) =>
+    ringContains(corners, centroid(building.outer)),
+  );
 }
 
-function centerInside(ring: readonly LngLat[], south: number, west: number, north: number, east: number): boolean {
-  if (ring.length === 0) return false;
-  const latitude = ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length;
-  const longitude = ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length;
-  return latitude >= south && latitude <= north && longitude >= west && longitude <= east;
+/** One side follows the first part of the drag. The opposite corner is the cursor. */
+function cursorBox(path: readonly LngLat[]): LngLat[] | null {
+  const origin = path[0];
+  const currentLng = path[path.length - 1];
+  if (origin === undefined || currentLng === undefined) return null;
+  const current = projectToLocal(currentLng, origin);
+  let axis: { east: number; north: number } | null = null;
+  for (const point of path) {
+    const local = projectToLocal(point, origin);
+    const length = Math.hypot(local.east, local.north);
+    if (length < 12) continue;
+    axis = { east: local.east / length, north: local.north / length };
+    break;
+  }
+  if (axis === null) return null;
+  const along = current.east * axis.east + current.north * axis.north;
+  const across = current.east * -axis.north + current.north * axis.east;
+  if (Math.abs(across) < 2) return null;
+  return [
+    { east: 0, north: 0 },
+    { east: axis.east * along, north: axis.north * along },
+    { east: current.east, north: current.north },
+    { east: -axis.north * across, north: axis.east * across },
+  ].map((point) => localToLngLat(point, origin));
 }
 
-/** The clicked building, plus every rendered part that sits inside its outline. */
+function showGroundShape(map: MapLibreMap, corners: readonly LngLat[] | null, axis: readonly LngLat[]): void {
+  const source = map.getSource('select-box');
+  if (source === undefined || !('setData' in source)) return;
+  if (corners !== null && corners.length >= 4) {
+    const ring = [...corners, corners[0]].filter((point): point is LngLat => point !== undefined);
+    (source as GeoJSONSource).setData({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'Polygon', coordinates: [ring.map((point) => [point.longitude, point.latitude])] },
+    });
+    return;
+  }
+  const line = axis.filter((point): point is LngLat => point !== undefined);
+  if (line.length < 2) {
+    (source as GeoJSONSource).setData(emptyCollection());
+    return;
+  }
+  (source as GeoJSONSource).setData({
+    type: 'Feature',
+    properties: {},
+    geometry: { type: 'LineString', coordinates: line.map((point) => [point.longitude, point.latitude]) },
+  });
+}
+
+function hideGroundBox(map: MapLibreMap): void {
+  const source = map.getSource('select-box');
+  if (source !== undefined && 'setData' in source) (source as GeoJSONSource).setData(emptyCollection());
+}
+
+function rememberDragPoint(path: LngLat[], point: LngLat): void {
+  const last = path[path.length - 1];
+  if (last === undefined) {
+    path.push(point);
+    return;
+  }
+  const step = projectToLocal(point, last);
+  if (Math.hypot(step.east, step.north) >= 3) path.push(point);
+}
+
+function pathWithCurrent(path: readonly LngLat[], point: LngLat): LngLat[] {
+  const last = path[path.length - 1];
+  if (last === undefined) return [point];
+  if (last.longitude === point.longitude && last.latitude === point.latitude) return [...path];
+  return [...path, point];
+}
+
+function boundsOf(corners: readonly LngLat[]): { south: number; west: number; north: number; east: number } {
+  let south = Infinity;
+  let north = -Infinity;
+  let west = Infinity;
+  let east = -Infinity;
+  for (const corner of corners) {
+    south = Math.min(south, corner.latitude);
+    north = Math.max(north, corner.latitude);
+    west = Math.min(west, corner.longitude);
+    east = Math.max(east, corner.longitude);
+  }
+  return { south, west, north, east };
+}
+
+/** The piece under the cursor, plus the other pieces of the same structure that touch it. */
 function buildingUnderCursor(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint[] {
   const direct = footprintsFrom(queryBuildings(map, [point.x, point.y]));
-  const seed = direct[0];
-  if (seed === undefined) return [];
-  const aroundSeed = footprintsFrom(queryBuildings(map, screenBox(map, direct.flatMap((hit) => hit.outer), point, 16)));
-  const seedCenter = centroid(seed.outer);
-  let outline = seed;
-  let outlineArea = ringAreaAbs(seed.outer);
-  for (const item of aroundSeed) {
-    const area = ringAreaAbs(item.outer);
-    if (area <= outlineArea || !ringContains(item.outer, seedCenter)) continue;
-    outline = item;
-    outlineArea = area;
-  }
-  const aroundOutline = footprintsFrom(queryBuildings(map, screenBox(map, outline.outer, point, 8)));
-  const parts = aroundOutline.filter((item) => item.id === outline.id || ringContains(outline.outer, centroid(item.outer)));
-  const chosen = parts.length > 0 ? parts : [seed];
-  return [outline, ...chosen.filter((item) => item.id !== outline.id)];
+  const clicked = direct[0] ?? buildingUnderShaft(map, point);
+  if (clicked === undefined) return [];
+  return partsOfSameStructure(map, clicked);
 }
 
-function screenBox(
-  map: MapLibreMap,
-  ring: readonly LngLat[],
-  point: { x: number; y: number },
-  pad: number,
-): [[number, number], [number, number]] {
-  let minX = point.x;
-  let minY = point.y;
-  let maxX = point.x;
-  let maxY = point.y;
+function partsOfSameStructure(map: MapLibreMap, seed: PickedFootprint): PickedFootprint[] {
+  const origin = centroid(seed.outer);
+  const pad = 100 / metersPerPixel(map, origin.latitude);
+  const bounds = footprintBounds(map, seed.outer);
+  const nearby = footprintsFrom(queryBuildings(map, [
+    [bounds.minX - pad, bounds.minY - pad],
+    [bounds.maxX + pad, bounds.maxY + pad],
+  ]));
+  const group = [seed];
+  const pending = nearby.filter((item) => !sameFootprint(item, seed));
+  let grew = true;
+  while (grew && group.length < 40) {
+    grew = false;
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      const candidate = pending[index];
+      if (candidate === undefined || !group.some((part) => sameStructure(part, candidate))) continue;
+      group.push(candidate);
+      pending.splice(index, 1);
+      grew = true;
+    }
+  }
+  return group;
+}
+
+/** Pieces of one tower touch, or one sits on the other. A block-sized outline does not. */
+function sameStructure(a: PickedFootprint, b: PickedFootprint): boolean {
+  const areaA = ringAreaAbs(a.outer);
+  const areaB = ringAreaAbs(b.outer);
+  const smaller = Math.min(areaA, areaB);
+  const larger = Math.max(areaA, areaB);
+  if (larger > Math.max(smaller * 12, 12_000)) return false;
+  if (ringContains(a.outer, centroid(b.outer)) || ringContains(b.outer, centroid(a.outer))) return true;
+  return ringsWithin(a.outer, b.outer, 8);
+}
+
+function ringsWithin(a: readonly LngLat[], b: readonly LngLat[], meters: number): boolean {
+  const origin = a[0];
+  if (origin === undefined) return false;
+  const left = a.map((point) => projectToLocal(point, origin));
+  const right = b.map((point) => projectToLocal(point, origin));
+  for (const point of left) {
+    if (distanceToRing(point, right) <= meters) return true;
+  }
+  for (const point of right) {
+    if (distanceToRing(point, left) <= meters) return true;
+  }
+  return false;
+}
+
+function distanceToRing(point: { east: number; north: number }, ring: readonly { east: number; north: number }[]): number {
+  let best = Infinity;
+  for (let index = 0; index < ring.length; index += 1) {
+    const start = ring[index];
+    const end = ring[(index + 1) % ring.length];
+    if (start === undefined || end === undefined) continue;
+    best = Math.min(best, distanceToSegment(point, start, end));
+  }
+  return best;
+}
+
+function metersPerPixel(map: MapLibreMap, latitude: number): number {
+  return (156543.03392 * Math.cos((latitude * Math.PI) / 180)) / 2 ** map.getZoom();
+}
+
+/** A pitched tower is drawn above its footprint, so a click on the shaft misses the ground polygon. */
+function buildingUnderShaft(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint | undefined {
+  const reach = shaftReachPixels(map);
+  if (reach < 12) return undefined;
+  const below = footprintsFrom(queryBuildings(map, [
+    [point.x - 28, point.y],
+    [point.x + 28, point.y + reach],
+  ]));
+  let best: { building: PickedFootprint; above: number } | undefined;
+  for (const building of below) {
+    const bounds = footprintBounds(map, building.outer);
+    if (point.x < bounds.minX - 4 || point.x > bounds.maxX + 4) continue;
+    const above = bounds.minY - point.y;
+    if (above < -8) continue;
+    const limit = extrusionPixels(map, building.heightM ?? 8, centroid(building.outer).latitude);
+    if (above > limit + 16) continue;
+    if (best === undefined || above < best.above) best = { building, above };
+  }
+  return best?.building;
+}
+
+function shaftReachPixels(map: MapLibreMap): number {
+  const center = map.getCenter();
+  return Math.min(520, extrusionPixels(map, 360, center.lat));
+}
+
+function extrusionPixels(map: MapLibreMap, heightM: number, latitude: number): number {
+  const metersPerPixel = (156543.03392 * Math.cos((latitude * Math.PI) / 180)) / 2 ** map.getZoom();
+  const pitch = (map.getPitch() * Math.PI) / 180;
+  if (metersPerPixel <= 0) return 0;
+  return (heightM / metersPerPixel) * Math.sin(pitch);
+}
+
+function footprintBounds(map: MapLibreMap, ring: readonly LngLat[]): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
   for (const vertex of ring) {
     const screen = map.project([vertex.longitude, vertex.latitude]);
     minX = Math.min(minX, screen.x);
@@ -466,10 +683,7 @@ function screenBox(
     maxX = Math.max(maxX, screen.x);
     maxY = Math.max(maxY, screen.y);
   }
-  return [
-    [minX - pad, minY - pad],
-    [maxX + pad, maxY + pad],
-  ];
+  return { minX, minY, maxX, maxY };
 }
 
 function centroid(ring: readonly LngLat[]): LngLat {
@@ -500,7 +714,9 @@ function ringAreaAbs(ring: readonly LngLat[]): number {
 }
 
 function queryBuildings(map: MapLibreMap, geometry: [number, number] | [[number, number], [number, number]]): MapGeoJSONFeature[] {
-  if (!map.isStyleLoaded()) return [];
+  if (!map.getStyle()) return [];
+  // isStyleLoaded() is false while the selection box is still updating, and that
+  // is exactly when a shift-drag needs the buildings that are already on screen.
   const layers = buildingLayerIds(map);
   const queried = layers.length > 0 ? map.queryRenderedFeatures(geometry, { layers }) : map.queryRenderedFeatures(geometry);
   return queried.filter((feature) => layers.length > 0 || feature.sourceLayer === 'building');
@@ -518,30 +734,52 @@ function buildingLayerIds(map: MapLibreMap): string[] {
 function footprintsFrom(features: readonly MapGeoJSONFeature[]): PickedFootprint[] {
   const picks: PickedFootprint[] = [];
   for (const feature of features) {
-    const rings = outerRings(feature);
-    const outer = rings[0];
-    if (outer === undefined || outer.length < 3) continue;
-    const id = feature.id !== undefined && feature.id !== null ? `way/${feature.id}` : ringId(outer);
-    const existing = picks.find((pick) => pick.id === id);
-    if (existing !== undefined) {
-      if (outer.length > existing.outer.length) existing.outer = outer;
-      continue;
+    for (const pick of featureFootprints(feature)) {
+      const existing = picks.find((item) => sameFootprint(item, pick));
+      if (existing !== undefined) {
+        if (pick.outer.length > existing.outer.length) {
+          existing.outer = pick.outer;
+          existing.holes = pick.holes;
+          existing.heightM = pick.heightM ?? existing.heightM;
+        }
+        continue;
+      }
+      picks.push(pick);
     }
-    picks.push({
-      id,
-      label: readLabel(feature.properties),
-      outer,
-      holes: rings.slice(1).filter((ring) => ring.length >= 3),
-      heightM: readHeight(feature.properties),
-    });
   }
   return picks;
 }
 
-function outerRings(feature: MapGeoJSONFeature): LngLat[][] {
-  if (feature.geometry.type === 'Polygon') return feature.geometry.coordinates.map(toRing);
-  if (feature.geometry.type === 'MultiPolygon') return feature.geometry.coordinates.map((polygon) => toRing(polygon[0] ?? []));
+function featureFootprints(feature: MapGeoJSONFeature): PickedFootprint[] {
+  const id = feature.id !== undefined && feature.id !== null ? `way/${feature.id}` : '';
+  const label = readLabel(feature.properties);
+  const heightM = readHeight(feature.properties);
+  if (feature.geometry.type === 'Polygon') {
+    const pick = footprintFromRings(id, label, feature.geometry.coordinates.map(toRing), heightM);
+    return pick === null ? [] : [pick];
+  }
+  if (feature.geometry.type === 'MultiPolygon') {
+    return feature.geometry.coordinates.flatMap((polygon) => {
+      const rings = polygon.map(toRing);
+      const pick = footprintFromRings(id, label, rings, heightM);
+      return pick === null ? [] : [pick];
+    });
+  }
   return [];
+}
+
+function footprintFromRings(id: string, label: string, rings: LngLat[][], heightM: number | null): PickedFootprint | null {
+  const outer = rings[0];
+  if (outer === undefined || outer.length < 3) return null;
+  const holes = rings.slice(1).filter((ring) => ring.length >= 3 && ringContains(outer, centroid(ring)));
+  return { id: id === '' ? ringId(outer) : id, label, outer, holes, heightM };
+}
+
+function sameFootprint(a: PickedFootprint, b: PickedFootprint): boolean {
+  if (a.id !== b.id) return false;
+  const left = centroid(a.outer);
+  const right = centroid(b.outer);
+  return Math.abs(left.latitude - right.latitude) < 0.00004 && Math.abs(left.longitude - right.longitude) < 0.00006;
 }
 
 function toRing(coordinates: Position[]): LngLat[] {
@@ -568,14 +806,6 @@ function readHeight(properties: GeoJsonProperties): number | null {
   const raw = properties?.render_height ?? properties?.height;
   const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
   return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function placeAreaBox(box: HTMLElement, start: { x: number; y: number }, end: { x: number; y: number }): void {
-  box.style.display = 'block';
-  box.style.left = `${Math.min(start.x, end.x)}px`;
-  box.style.top = `${Math.min(start.y, end.y)}px`;
-  box.style.width = `${Math.abs(end.x - start.x)}px`;
-  box.style.height = `${Math.abs(end.y - start.y)}px`;
 }
 
 function vertexUnder(map: MapLibreMap, event: MapMouseEvent): number | null {
@@ -611,27 +841,28 @@ function lineCollection(ring: LngLat[]): FeatureCollection {
   };
 }
 
-function footprintCollection(rings: readonly LngLat[][], vertices: readonly LngLat[]): FeatureCollection {
+function footprintCollection(rings: readonly LngLat[][], vertices: readonly LngLat[], heights: readonly number[]): FeatureCollection {
   const features: Feature[] = vertices.map((point, index) => ({
     type: 'Feature',
     properties: { vertex: index },
     geometry: { type: 'Point', coordinates: [point.longitude, point.latitude] },
   }));
-  for (const ring of rings) {
-    if (ring.length < 3) continue;
+  rings.forEach((ring, index) => {
+    if (ring.length < 3) return;
     const closed = [...ring, ring[0]].filter((point): point is LngLat => point !== undefined);
     const coordinates = closed.map((point) => [point.longitude, point.latitude]);
+    const height = heights[index] ?? 8;
     features.push({
       type: 'Feature',
-      properties: {},
+      properties: { height },
       geometry: { type: 'LineString', coordinates },
     });
     features.push({
       type: 'Feature',
-      properties: {},
+      properties: { height },
       geometry: { type: 'Polygon', coordinates: [coordinates] },
     });
-  }
+  });
   return { type: 'FeatureCollection', features };
 }
 
