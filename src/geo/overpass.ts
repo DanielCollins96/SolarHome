@@ -190,7 +190,8 @@ function wholeBuildingQuery(latitude: number, longitude: number, wayReachM: numb
 }
 
 async function fetchElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {
-  const cached = await deps.cache.get(cacheKey);
+  // The cache only saves a trip. A broken or full browser store must not fail the lookup.
+  const cached = await deps.cache.get(cacheKey).catch(() => undefined);
   if (cached !== undefined) return parseElements(cached);
   const delays = deps.retryDelaysMs ?? RETRY_DELAYS_MS;
   for (let attempt = 0; ; attempt += 1) {
@@ -231,7 +232,7 @@ async function requestElements(query: string, cacheKey: string, deps: OverpassDe
   } catch {
     throw new GeoFailure('network', 'OpenStreetMap returned an unexpected building response.');
   }
-  await deps.cache.set(cacheKey, body);
+  await deps.cache.set(cacheKey, body).catch(() => undefined);
   return elements;
 }
 
@@ -364,6 +365,8 @@ export interface MapBounds {
   west: number;
   north: number;
   east: number;
+  /** A turned box inside the bounds. Only buildings centred in it are kept. */
+  corners?: readonly LngLat[];
 }
 
 const MAX_BOX_M = 700;
@@ -382,6 +385,7 @@ export async function loadBuildingsInBounds(bounds: MapBounds, deps: OverpassDep
   const buildings = elements
     .flatMap((element) => toBuildings(element, element.tags?.name ?? 'Building'))
     .filter((building) => centerInside(building, bounds) && buildingArea(building) <= boxArea * 1.5)
+    .filter((building) => bounds.corners === undefined || centerInsideRing(building, bounds.corners))
     .slice(0, MAX_BUILDINGS);
   if (buildings.length === 0) {
     throw new GeoFailure('not-found', 'No buildings in that box. Shift-drag across the gray building shapes.');
@@ -403,6 +407,16 @@ function centerInside(building: GeographicBuilding, bounds: MapBounds): boolean 
   const latitude = ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length;
   const longitude = ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length;
   return latitude >= bounds.south && latitude <= bounds.north && longitude >= bounds.west && longitude <= bounds.east;
+}
+
+function centerInsideRing(building: GeographicBuilding, corners: readonly LngLat[]): boolean {
+  const ring = building.parts[0]?.outer;
+  if (ring === undefined || ring.length === 0) return false;
+  const center = {
+    latitude: ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length,
+    longitude: ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length,
+  };
+  return pointInRing({ east: 0, north: 0 }, corners.map((corner) => projectToLocal(corner, center)));
 }
 
 function buildingArea(building: GeographicBuilding): number {

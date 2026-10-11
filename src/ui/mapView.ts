@@ -18,6 +18,8 @@ export interface AreaBounds {
   west: number;
   north: number;
   east: number;
+  /** The drawn box, which is usually turned. The bounds above only enclose it. */
+  corners: LngLat[];
 }
 
 export interface PickedFootprint {
@@ -251,7 +253,7 @@ export function mountMap(
       return;
     }
     help.setNote('Loading buildings…');
-    options.onArea(boundsOf(corners));
+    options.onArea({ ...boundsOf(corners), corners });
     swallowFollowingClick();
   };
   let swallowClick = false;

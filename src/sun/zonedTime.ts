@@ -84,17 +84,29 @@ interface ZonedParts {
   second: number;
 }
 
+/** Building a formatter is slow, and playback converts times every frame, so keep one per zone. */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = formatters.get(timeZone);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    formatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 function readZonedParts(instant: Date, timeZone: string): ZonedParts {
-  const listed = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(instant);
+  const listed = zoneFormatter(timeZone).formatToParts(instant);
 
   const value: Record<string, string> = {};
   for (const part of listed) {

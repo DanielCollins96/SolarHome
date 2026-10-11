@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createLookupCache } from '../src/geo/cache.ts';
 import { GeoFailure, searchAddresses } from '../src/geo/geocode.ts';
-import { buildingFromElements, loadBuilding, wholeBuildingFromElements } from '../src/geo/overpass.ts';
+import { buildingFromElements, loadBuilding, loadBuildingsInBounds, wholeBuildingFromElements } from '../src/geo/overpass.ts';
 
 const nominatimBody = JSON.stringify([
   {
@@ -169,6 +169,43 @@ describe('building lookup', () => {
     expect(building.id).toBe('relation/14629176');
     expect(building.parts).toHaveLength(1);
     expect(building.parts[0]?.tags?.height).toBe('440');
+  });
+
+  it('still returns the building when the browser cache cannot save it', async () => {
+    const way = { type: 'way', id: 4, tags: { building: 'yes' }, geometry: ring(1, 2, 0.0001, 0.0001) };
+    const fetchImpl: typeof fetch = async () => new Response(JSON.stringify({ elements: [way] }), { status: 200 });
+    const full = createLookupCache({
+      get: async () => {
+        throw new Error('IndexedDB is unavailable.');
+      },
+      set: async () => {
+        throw new Error('QuotaExceededError');
+      },
+    });
+    const hit = { label: 'Full', latitude: 1, longitude: 2, osmType: 'way' as const, osmId: 4 };
+    const building = await loadBuilding(hit, { fetch: fetchImpl, cache: full });
+    expect(building.id).toBe('way/4');
+  });
+
+  it('keeps only buildings inside a turned box, not its whole bounding rectangle', async () => {
+    // A diamond inside the bounds. One house sits in its middle, one in a corner of the bounds outside it.
+    const inside = { type: 'way', id: 1, tags: { building: 'yes' }, geometry: ring(1.00195, 2.00195, 0.0001, 0.0001) };
+    const corner = { type: 'way', id: 2, tags: { building: 'yes' }, geometry: ring(1.00002, 2.00002, 0.0001, 0.0001) };
+    const fetchImpl: typeof fetch = async () => new Response(JSON.stringify({ elements: [inside, corner] }), { status: 200 });
+    const bounds = {
+      south: 1,
+      west: 2,
+      north: 1.004,
+      east: 2.004,
+      corners: [
+        { latitude: 1, longitude: 2.002 },
+        { latitude: 1.002, longitude: 2.004 },
+        { latitude: 1.004, longitude: 2.002 },
+        { latitude: 1.002, longitude: 2 },
+      ],
+    };
+    const buildings = await loadBuildingsInBounds(bounds, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(buildings.map((building) => building.id)).toEqual(['way/1']);
   });
 
   it('leaves out an outline that only stands in for the parts', () => {

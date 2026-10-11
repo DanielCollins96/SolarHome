@@ -112,6 +112,8 @@ export function mountControls(
 
   let playing = false;
   let lastTick = 0;
+  // Pause then play within one frame would otherwise leave two loops running at double speed.
+  let playLoop = 0;
   const stopPlay = () => {
     playing = false;
     lastTick = 0;
@@ -119,23 +121,26 @@ export function mountControls(
     playButton.setAttribute('aria-label', 'Play');
     playButton.setAttribute('aria-pressed', 'false');
   };
-  const tickPlay = (now: number) => {
-    if (!playing) return;
+  const tickPlay = (loop: number, now: number) => {
+    if (!playing || loop !== playLoop) return;
     if (lastTick !== 0) {
       const delta = Math.min(100, now - lastTick);
       clock.minutes = (clock.minutes + (delta / 1000) * 60) % 1440;
       publish();
     }
     lastTick = now;
-    requestAnimationFrame(tickPlay);
+    requestAnimationFrame((next) => tickPlay(loop, next));
   };
   playButton.addEventListener('click', () => {
     playing = !playing;
     playButton.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
     playButton.setAttribute('aria-label', playing ? 'Pause' : 'Play');
     playButton.setAttribute('aria-pressed', playing ? 'true' : 'false');
-    if (playing) requestAnimationFrame(tickPlay);
-    else lastTick = 0;
+    lastTick = 0;
+    if (playing) {
+      const loop = ++playLoop;
+      requestAnimationFrame((next) => tickPlay(loop, next));
+    }
   });
 
   const publish = () => {
@@ -167,11 +172,12 @@ export function mountControls(
       altitude.textContent = `${readout.altitudeDeg.toFixed(1)}°`;
       azimuth.textContent = `${readout.azimuthDeg.toFixed(1)}°`;
       shadow.textContent = readout.belowHorizon ? '—' : shortShadow(readout.shadowLabel);
-      const nearSouth = angularDifference(readout.azimuthDeg, 180) <= 1;
+      // The noon sun is due south north of the tropics and due north south of them.
+      const onMeridian = angularDifference(readout.azimuthDeg, 180) <= 1 || angularDifference(readout.azimuthDeg, 0) <= 1;
       noonNote.textContent =
-        !readout.belowHorizon && nearSouth
-          ? 'Solar noon. In the northern hemisphere the shadow points north.'
-          : 'At solar noon the shadow points north.';
+        !readout.belowHorizon && onMeridian
+          ? `Solar noon. The shadow points ${readout.shadowLabel}.`
+          : 'At solar noon the shadow points north in the northern hemisphere and south in the southern.';
     },
     setStatus(message) {
       status.textContent = message;

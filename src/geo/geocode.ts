@@ -35,7 +35,8 @@ export async function searchAddresses(query: string, deps: GeocodeDeps): Promise
   const normalized = query.trim().replace(/\s+/g, ' ');
   if (normalized.length < 3) return [];
   const key = `nominatim:${normalized.toLowerCase()}`;
-  const cached = await deps.cache.get(key);
+  // A broken or full browser store must not fail the search.
+  const cached = await deps.cache.get(key).catch(() => undefined);
   if (cached !== undefined) return parseHits(cached);
 
   const url = sameOrigin(ENDPOINT);
@@ -66,7 +67,7 @@ export async function searchAddresses(query: string, deps: GeocodeDeps): Promise
     throw new GeoFailure('network', 'The address search returned an unexpected response.');
   }
   if (hits.length === 0) throw new GeoFailure('not-found', 'No place matched that address.');
-  await deps.cache.set(key, body);
+  await deps.cache.set(key, body).catch(() => undefined);
   return hits;
 }
 
