@@ -1,11 +1,7 @@
-/**
- * Fixed site for the milestone 1 scene.
- * These are the observer coordinates from the NREL Solar Position Algorithm sample
- * (Reda & Andreas, 2004): Golden, Colorado. Elevation is not passed to SunCalc.getPosition.
- */
+/** Toronto City Hall, the building the app selects on open. Elevation is not passed to SunCalc. */
 export const DEMO_LOCATION = {
-  name: 'Calgary, Alberta',
-  latitude: 51.0447,
-  longitude: -114.0719,
-  timeZone: 'America/Edmonton',
+  name: 'Toronto City Hall',
+  latitude: 43.6536032,
+  longitude: -79.3840055,
+  timeZone: 'America/Toronto',
 } as const;

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { DEMO_LOCATION } from '../src/scene/demoLocation.ts';
 import {
   directionTowardSun,
   shadowCardinalLabel,
@@ -13,6 +12,9 @@ import {
  * Observer: 39.742476°N, 105.1786°W. Local time 2003-10-17 12:30:30, timezone -7.
  * Published topocentric azimuth 194.34024° (clockwise from north) and zenith 50.11162°.
  */
+const NREL_LATITUDE = 39.742476;
+const NREL_LONGITUDE = -105.1786;
+const NREL_TIME_ZONE = 'America/Denver';
 const NREL_AZIMUTH_DEG = 194.34024;
 const NREL_ALTITUDE_DEG = 90 - 50.11162;
 const NREL_INSTANT = new Date(Date.UTC(2003, 9, 17, 19, 30, 30));
@@ -39,7 +41,7 @@ describe('sun direction in the scene frame', () => {
   });
 
   it('matches the NREL sample angles and the published scene vector', () => {
-    const sun = sunDirection(NREL_INSTANT, DEMO_LOCATION.latitude, DEMO_LOCATION.longitude);
+    const sun = sunDirection(NREL_INSTANT, NREL_LATITUDE, NREL_LONGITUDE);
     expect(sun.azimuthDeg).toBeCloseTo(NREL_AZIMUTH_DEG, 1);
     expect(sun.altitudeDeg).toBeCloseTo(NREL_ALTITUDE_DEG, 1);
 
@@ -51,19 +53,14 @@ describe('sun direction in the scene frame', () => {
   });
 
   it('points the solar-noon shadow north at Golden', () => {
-    const minutes = solarNoonLocalMinutes(
-      '2026-06-21',
-      DEMO_LOCATION.latitude,
-      DEMO_LOCATION.longitude,
-      DEMO_LOCATION.timeZone,
-    );
+    const minutes = solarNoonLocalMinutes('2026-06-21', NREL_LATITUDE, NREL_LONGITUDE, NREL_TIME_ZONE);
     expect(minutes).toBeGreaterThan(13 * 60);
     expect(minutes).toBeLessThan(13 * 60 + 10);
 
     const sun = sunDirection(
       new Date(Date.UTC(2026, 5, 21, 19, 2, 37)),
-      DEMO_LOCATION.latitude,
-      DEMO_LOCATION.longitude,
+      NREL_LATITUDE,
+      NREL_LONGITUDE,
     );
     expect(sun.azimuthDeg).toBeCloseTo(180, 1);
     expect(sun.y).toBeGreaterThan(0);

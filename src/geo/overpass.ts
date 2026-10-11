@@ -23,7 +23,7 @@ interface OverpassElement {
   id: number;
   tags?: Record<string, string>;
   geometry?: OsmPoint[];
-  members?: { type: string; role?: string; geometry?: OsmPoint[] }[];
+  members?: { type: string; ref?: number; role?: string; geometry?: OsmPoint[] }[];
 }
 
 const ENDPOINT = sameOrigin('/api/overpass');
@@ -90,6 +90,69 @@ export function chooseBuilding(
   if (best !== null) return best.building;
   if (nearest !== null && nearest.distance <= AROUND_M) return nearest.building;
   return null;
+}
+
+/**
+ * The building relation that contains this point, including every outline and part.
+ * A single way is used when the point is not inside a building relation.
+ */
+export async function loadWholeBuilding(
+  latitude: number,
+  longitude: number,
+  deps: OverpassDeps,
+): Promise<GeographicBuilding> {
+  const key = `overpass:whole:${latitude.toFixed(5)}:${longitude.toFixed(5)}`;
+  const elements = await fetchElements(wholeBuildingQuery(latitude, longitude), key, deps);
+  const building = wholeBuildingFromElements(elements, latitude, longitude);
+  if (building === null) {
+    throw new GeoFailure('not-found', 'No building footprint was found at the starting place.');
+  }
+  return building;
+}
+
+/** Pick the containing building relation, or the containing way when there is no relation. */
+export function wholeBuildingFromElements(
+  elements: OverpassElement[],
+  latitude: number,
+  longitude: number,
+): GeographicBuilding | null {
+  const ways = new Map<number, OverpassElement>();
+  for (const element of elements) {
+    if (element.type === 'way') ways.set(element.id, element);
+  }
+  let best: { building: GeographicBuilding; area: number } | null = null;
+  for (const element of elements) {
+    if (element.type !== 'relation' || element.tags?.type !== 'building') continue;
+    const building = relationBuilding(element, ways);
+    if (building === null || !buildingContains(building, latitude, longitude)) continue;
+    const area = buildingArea(building);
+    if (best === null || area < best.area) best = { building, area };
+  }
+  if (best !== null) return best.building;
+  return chooseBuilding(elements, latitude, longitude, 'Building');
+}
+
+function relationBuilding(relation: OverpassElement, ways: Map<number, OverpassElement>): GeographicBuilding | null {
+  const parts: GeographicRing[] = [];
+  for (const member of relation.members ?? []) {
+    if (member.role === 'inner' || member.type !== 'way' || member.ref === undefined) continue;
+    const way = ways.get(member.ref);
+    const ring = closedRing(way?.geometry ?? member.geometry);
+    if (ring === null) continue;
+    parts.push({ outer: ring, holes: [], tags: way?.tags ?? {} });
+  }
+  if (parts.length === 0) return null;
+  return {
+    id: `relation/${relation.id}`,
+    label: relation.tags?.name ?? 'Building',
+    tags: relation.tags ?? {},
+    parts,
+    provenance: { source: 'osm', confidence: 0.8, note: `relation ${relation.id}` },
+  };
+}
+
+function wholeBuildingQuery(latitude: number, longitude: number): string {
+  return `[out:json][timeout:25];relation["type"="building"](around:80,${latitude},${longitude});(._;>;);out geom;`;
 }
 
 async function fetchElements(query: string, cacheKey: string, deps: OverpassDeps): Promise<OverpassElement[]> {

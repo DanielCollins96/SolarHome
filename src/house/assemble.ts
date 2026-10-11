@@ -9,6 +9,8 @@ import { localToLngLat, projectRing, type LngLat } from '../geo/projection.ts';
 export interface GeographicRing {
   outer: LngLat[];
   holes: LngLat[][];
+  /** OSM tags for this piece, when a building relation has parts of different heights. */
+  tags?: Record<string, string>;
 }
 
 export interface GeographicBuilding {
@@ -35,16 +37,17 @@ export function assembleHouse(building: GeographicBuilding): HouseModel {
   );
   const centroid = polygonCentroid(largest.outer.points);
   const origin = localToLngLat(centroid, anchor);
-  const height = estimateEaveHeight({
-    osmHeight: building.tags.height,
-    osmLevels: building.tags['building:levels'],
-  });
   const issues = cleaned.flatMap((part) => [...part.outer.issues, ...part.holes.flatMap((hole) => hole.issues)]);
 
   const parts: HousePart[] = cleaned.map((part, index) => {
+    const source = building.parts[index]?.tags ?? building.tags;
+    const height = estimateEaveHeight({
+      osmHeight: source.height,
+      osmLevels: source['building:levels'],
+    });
     const footprint = shift(part.outer.points, centroid);
     const holes = part.holes.map((hole) => shift(hole.points, centroid));
-    const roof = estimateRoof(building.tags, footprint);
+    const roof = estimateRoof(source, footprint);
     issues.push(...roof.issues);
     return {
       id: `part-${index + 1}`,
@@ -53,6 +56,10 @@ export function assembleHouse(building: GeographicBuilding): HouseModel {
       eaveHeightM: height.eaveHeightM,
       roof: roof.roof,
     };
+  });
+  const height = estimateEaveHeight({
+    osmHeight: (building.parts[0]?.tags ?? building.tags).height,
+    osmLevels: (building.parts[0]?.tags ?? building.tags)['building:levels'],
   });
 
   return {
@@ -86,17 +93,18 @@ export function assembleBuildings(buildings: readonly GeographicBuilding[]): Hou
     heightProvenance: Provenance;
   }[] = [];
   for (const building of buildings) {
-    const height = estimateEaveHeight({
-      osmHeight: building.tags.height,
-      osmLevels: building.tags['building:levels'],
-    });
     for (const part of building.parts) {
+      const source = part.tags ?? building.tags;
+      const height = estimateEaveHeight({
+        osmHeight: source.height,
+        osmLevels: source['building:levels'],
+      });
       const outer = cleanFootprint(projectRing(part.outer, anchor));
       if (outer.points.length < 3) continue;
       const holes = part.holes
         .map((hole) => cleanFootprint(projectRing(hole, anchor)))
         .filter((hole) => hole.points.length >= 3);
-      const roof = estimateRoof(building.tags, outer.points);
+      const roof = estimateRoof(source, outer.points);
       drafted.push({
         points: outer.points,
         holes: holes.map((hole) => hole.points),

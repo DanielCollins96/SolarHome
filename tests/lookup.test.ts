@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createLookupCache } from '../src/geo/cache.ts';
 import { GeoFailure, searchAddresses } from '../src/geo/geocode.ts';
-import { buildingFromElements, loadBuilding } from '../src/geo/overpass.ts';
+import { buildingFromElements, loadBuilding, wholeBuildingFromElements } from '../src/geo/overpass.ts';
 
 const nominatimBody = JSON.stringify([
   {
@@ -120,6 +120,33 @@ describe('building lookup', () => {
     });
   });
 
+  it('keeps every part of a building relation', () => {
+    const podium = ring(43.653, -79.385, 0.0012, 0.0016);
+    const tower = ring(43.6534, -79.3844, 0.0003, 0.0003);
+    const building = wholeBuildingFromElements(
+      [
+        {
+          type: 'relation',
+          id: 542980,
+          tags: { type: 'building', name: 'Toronto City Hall' },
+          members: [
+            { type: 'way', ref: 1, role: 'outline' },
+            { type: 'way', ref: 2, role: 'part' },
+          ],
+        },
+        { type: 'way', id: 1, tags: { building: 'yes', height: '8' }, geometry: podium },
+        { type: 'way', id: 2, tags: { building: 'yes', height: '70' }, geometry: tower },
+      ],
+      43.6536,
+      -79.384,
+    );
+    expect(building?.label).toBe('Toronto City Hall');
+    expect(building?.id).toBe('relation/542980');
+    expect(building?.parts).toHaveLength(2);
+    expect(building?.parts[0]?.tags?.height).toBe('8');
+    expect(building?.parts[1]?.tags?.height).toBe('70');
+  });
+
   it('treats a busy Overpass response as a timeout', async () => {
     const fetchImpl: typeof fetch = async () => new Response('busy', { status: 504 });
     const hit = { label: 'Busy', latitude: 1, longitude: 2, osmType: 'way' as const, osmId: 4 };
@@ -128,3 +155,13 @@ describe('building lookup', () => {
     });
   });
 });
+
+function ring(lat: number, lon: number, height: number, width: number): { lat: number; lon: number }[] {
+  return [
+    { lat, lon },
+    { lat, lon: lon + width },
+    { lat: lat + height, lon: lon + width },
+    { lat: lat + height, lon },
+    { lat, lon },
+  ];
+}

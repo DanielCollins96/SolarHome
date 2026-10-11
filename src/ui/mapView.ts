@@ -3,7 +3,8 @@ import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
 import type { GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import type { LngLat } from '../geo/projection.ts';
+import { projectToLocal, type LngLat } from '../geo/projection.ts';
+import { pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
@@ -49,6 +50,7 @@ export function mountMap(
     onTrace: (ring: LngLat[]) => void;
     onPick: (point: LngLat) => void;
     onArea: (bounds: AreaBounds) => void;
+    onBuilding: (parts: PickedFootprint[]) => void;
     onBuildings: (buildings: PickedFootprint[], mode: 'replace' | 'toggle') => void;
   },
 ): MapController {
@@ -57,6 +59,7 @@ export function mountMap(
     style: MAP_STYLE,
     center: [options.longitude, options.latitude],
     zoom: 18,
+    pitch: 45,
     boxZoom: false,
   });
   let vertices: LngLat[] = [];
@@ -215,8 +218,8 @@ export function mountMap(
         swallowClick = false;
         return;
       }
-      const hit = buildingsAt(map, event.point)[0];
-      if (hit !== undefined) options.onBuildings([hit], 'toggle');
+      const parts = buildingUnderCursor(map, event.point);
+      if (parts.length > 0) options.onBuilding(parts);
       else options.onPick(toLngLat(event));
       return;
     }
@@ -350,6 +353,7 @@ function mountMapHelp(container: HTMLElement): {
     },
     setNote(text) {
       if (note !== null) note.textContent = text;
+      if (text !== '' && summary !== null) summary.textContent = '';
     },
   };
 }
@@ -398,10 +402,6 @@ function focusOutline(map: MapLibreMap, rings: readonly (readonly LngLat[])[], l
   );
 }
 
-function buildingsAt(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint[] {
-  return footprintsFrom(queryBuildings(map, [point.x, point.y]));
-}
-
 function buildingsInRect(
   map: MapLibreMap,
   start: { x: number; y: number },
@@ -426,6 +426,77 @@ function centerInside(ring: readonly LngLat[], south: number, west: number, nort
   const latitude = ring.reduce((sum, point) => sum + point.latitude, 0) / ring.length;
   const longitude = ring.reduce((sum, point) => sum + point.longitude, 0) / ring.length;
   return latitude >= south && latitude <= north && longitude >= west && longitude <= east;
+}
+
+/** The clicked building, plus every rendered part that sits inside its outline. */
+function buildingUnderCursor(map: MapLibreMap, point: { x: number; y: number }): PickedFootprint[] {
+  const direct = footprintsFrom(queryBuildings(map, [point.x, point.y]));
+  const seed = direct[0];
+  if (seed === undefined) return [];
+  const aroundSeed = footprintsFrom(queryBuildings(map, screenBox(map, direct.flatMap((hit) => hit.outer), point, 16)));
+  const seedCenter = centroid(seed.outer);
+  let outline = seed;
+  let outlineArea = ringAreaAbs(seed.outer);
+  for (const item of aroundSeed) {
+    const area = ringAreaAbs(item.outer);
+    if (area <= outlineArea || !ringContains(item.outer, seedCenter)) continue;
+    outline = item;
+    outlineArea = area;
+  }
+  const aroundOutline = footprintsFrom(queryBuildings(map, screenBox(map, outline.outer, point, 8)));
+  const parts = aroundOutline.filter((item) => item.id === outline.id || ringContains(outline.outer, centroid(item.outer)));
+  const chosen = parts.length > 0 ? parts : [seed];
+  return [outline, ...chosen.filter((item) => item.id !== outline.id)];
+}
+
+function screenBox(
+  map: MapLibreMap,
+  ring: readonly LngLat[],
+  point: { x: number; y: number },
+  pad: number,
+): [[number, number], [number, number]] {
+  let minX = point.x;
+  let minY = point.y;
+  let maxX = point.x;
+  let maxY = point.y;
+  for (const vertex of ring) {
+    const screen = map.project([vertex.longitude, vertex.latitude]);
+    minX = Math.min(minX, screen.x);
+    minY = Math.min(minY, screen.y);
+    maxX = Math.max(maxX, screen.x);
+    maxY = Math.max(maxY, screen.y);
+  }
+  return [
+    [minX - pad, minY - pad],
+    [maxX + pad, maxY + pad],
+  ];
+}
+
+function centroid(ring: readonly LngLat[]): LngLat {
+  const latitude = ring.reduce((sum, vertex) => sum + vertex.latitude, 0) / ring.length;
+  const longitude = ring.reduce((sum, vertex) => sum + vertex.longitude, 0) / ring.length;
+  return { latitude, longitude };
+}
+
+function ringContains(ring: readonly LngLat[], point: LngLat): boolean {
+  return pointInRing(
+    { east: 0, north: 0 },
+    ring.map((vertex) => projectToLocal(vertex, point)),
+  );
+}
+
+function ringAreaAbs(ring: readonly LngLat[]): number {
+  const origin = ring[0];
+  if (origin === undefined) return 0;
+  const local = ring.map((vertex) => projectToLocal(vertex, origin));
+  let twice = 0;
+  for (let index = 0; index < local.length; index += 1) {
+    const current = local[index];
+    const next = local[(index + 1) % local.length];
+    if (current === undefined || next === undefined) continue;
+    twice += current.east * next.north - next.east * current.north;
+  }
+  return Math.abs(twice / 2);
 }
 
 function queryBuildings(map: MapLibreMap, geometry: [number, number] | [[number, number], [number, number]]): MapGeoJSONFeature[] {
