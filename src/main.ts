@@ -308,10 +308,20 @@ try {
   async function upgradeSelection(placeholder: GeographicBuilding, token: number): Promise<void> {
     const center = ringCentroid(placeholder.parts[0]?.outer ?? []);
     try {
-      // Every corner of the clicked map pieces helps find the building they belong to.
-      const corners = placeholder.parts.flatMap((part) => part.outer).slice(0, 400);
-      const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache }, reachFrom(placeholder, center) + 5, corners);
-      if (token !== upgradeToken || !overlaps(whole, placeholder, center)) return;
+      // The corners of the clicked piece find the building it belongs to. Its touching pieces may
+      // be the building next door, so their corners only settle a tie.
+      const [clicked, ...touching] = placeholder.parts;
+      const corners = clicked?.outer ?? [];
+      const nearby = touching.flatMap((part) => part.outer).slice(0, 400);
+      const whole = await loadWholeBuilding(
+        center.latitude,
+        center.longitude,
+        { fetch, cache },
+        reachFrom(placeholder, center) + 5,
+        corners,
+        nearby,
+      );
+        if (token !== upgradeToken || !overlaps(whole, placeholder, center)) return;
       if (!picked.some((item) => sameBuilding(item, placeholder))) return;
       // A map piece can be one pillar of a landmark, so a much larger whole is fine up to the
       // size of a landmark. Beyond that, a click on a house must not pull in a city block.

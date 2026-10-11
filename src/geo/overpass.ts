@@ -100,6 +100,7 @@ async function loadOsmBuildingAt(
   reachM: number,
   deps: OverpassDeps,
   probes: readonly LngLat[] = [],
+  nearby: readonly LngLat[] = [],
 ): Promise<GeographicBuilding | null> {
   const reach = Math.min(MAX_POINT_REACH_M, Math.max(MIN_POINT_REACH_M, Math.ceil(reachM)));
   const dLat = reach / 111_320;
@@ -109,16 +110,16 @@ async function loadOsmBuildingAt(
   // The point, plus any extra points known to be on the building, such as the corners of the
   // map piece that was clicked. A piece at the edge of a landmark can have its centre just outside.
   const points = [{ latitude, longitude }, ...probes];
-  const score = (footprint: GeographicBuilding) =>
-    points.filter((point) => buildingContains(footprint, point.latitude, point.longitude)).length;
+  const inside = (footprint: GeographicBuilding, list: readonly LngLat[]) =>
+    list.filter((point) => buildingContains(footprint, point.latitude, point.longitude)).length;
   // Relations in a map box are listed without the members outside it, so each is loaded whole.
   const relations = area
     .filter((element) => element.type === 'relation' && (element.tags?.type === 'building' || element.tags?.building !== undefined))
     .slice(0, 4);
-  const candidates: { building: GeographicBuilding; hits: number; area: number; relation: boolean }[] = [];
+  const candidates: { building: GeographicBuilding; hits: number; nearHits: number; area: number; relation: boolean }[] = [];
   const consider = (building: GeographicBuilding, footprint: GeographicBuilding, relation: boolean) => {
-    const hits = score(footprint);
-    if (hits > 0) candidates.push({ building, hits, area: buildingArea(footprint), relation });
+    const hits = inside(footprint, points);
+    if (hits > 0) candidates.push({ building, hits, nearHits: inside(footprint, nearby), area: buildingArea(footprint), relation });
   };
   for (const relation of relations) {
     const full = await fetchRelation(relation.id, deps);
@@ -135,8 +136,12 @@ async function loadOsmBuildingAt(
     if (element.type !== 'way' || element.tags?.building === undefined) continue;
     for (const building of toBuildings(element, element.tags?.name ?? 'Building')) consider(building, building, false);
   }
-  // Most points inside wins. On a tie a building relation beats its own outline, then the smaller one wins.
-  candidates.sort((a, b) => b.hits - a.hits || Number(b.relation) - Number(a.relation) || a.area - b.area);
+  // Most of the clicked points inside wins. Points on touching pieces only break a tie: those can
+  // belong to the building next door, like a rotunda against a courthouse. Then a building relation
+  // beats its own outline, and the smaller one wins.
+  candidates.sort(
+    (a, b) => b.hits - a.hits || b.nearHits - a.nearHits || Number(b.relation) - Number(a.relation) || a.area - b.area,
+  );
   const chosen = candidates[0];
   if (chosen === undefined) return null;
   return chosen.relation ? chosen.building : withLooseParts(chosen.building, deps);
@@ -281,8 +286,9 @@ export async function loadWholeBuilding(
   deps: OverpassDeps,
   wayReachM = 0,
   probes: readonly LngLat[] = [],
+  nearby: readonly LngLat[] = [],
 ): Promise<GeographicBuilding> {
-  const building = await loadOsmBuildingAt(latitude, longitude, wayReachM, deps, probes);
+  const building = await loadOsmBuildingAt(latitude, longitude, wayReachM, deps, probes, nearby);
   if (building === null) {
     throw new GeoFailure('not-found', 'No building footprint was found at that place.');
   }
