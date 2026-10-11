@@ -23,7 +23,14 @@ import type { SunDirection } from '../sun/sunPosition.ts';
 
 const WALL_RED = 0xd9534f;
 const ROOF_RED = 0xb02a2a;
-const SHADOW_OPACITY = 0.35;
+const SHADOW_OPACITY = 0.55;
+/** Dark blue rather than black, so the shadow stands apart from the basemap's gray buildings. */
+const SHADOW_COLOR = 0x1b2a55;
+/** Low fill and a strong sun, so a shaded roof or wall reads clearly darker than a sunlit one. */
+const FILL_LIGHT = 0.8;
+const SUN_LIGHT = 2.6;
+/** With the sun down there is no shading to show, so the fill alone keeps the model readable. */
+const NIGHT_FILL_LIGHT = 1.8;
 /** A sun this close to the horizon throws shadows kilometres long. Clamp so the shadow map keeps some detail. */
 const LOWEST_SHADOW_ALTITUDE_DEG = 3;
 
@@ -41,8 +48,9 @@ export function createModelLayer(id: string): {
   const camera = new Camera();
   const holder = new Group();
   scene.add(holder);
-  scene.add(new AmbientLight(0xffffff, 1.4));
-  const sun = new DirectionalLight(0xffffff, 1.6);
+  const fill = new AmbientLight(0xffffff, FILL_LIGHT);
+  scene.add(fill);
+  const sun = new DirectionalLight(0xffffff, SUN_LIGHT);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.bias = -0.0004;
@@ -50,7 +58,7 @@ export function createModelLayer(id: string): {
   scene.add(sun);
   scene.add(sun.target);
   // Shows only the shadow that falls on it, so the map stays visible underneath.
-  const ground = new Mesh(new PlaneGeometry(1, 1), new ShadowMaterial({ opacity: SHADOW_OPACITY }));
+  const ground = new Mesh(new PlaneGeometry(1, 1), new ShadowMaterial({ color: SHADOW_COLOR, opacity: SHADOW_OPACITY }));
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
@@ -67,7 +75,8 @@ export function createModelLayer(id: string): {
 
   // Fit the light's shadow camera around the model, and the ground sheet around the longest shadow.
   const placeSun = () => {
-    sun.intensity = sunUp ? 1.6 : 0;
+    sun.intensity = sunUp ? SUN_LIGHT : 0;
+    fill.intensity = sunUp ? FILL_LIGHT : NIGHT_FILL_LIGHT;
     ground.visible = sunUp;
     const radius = Math.max(bounds.radius, 1);
     const altitude = Math.max(Math.asin(Math.min(towardSun.y, 1)), (LOWEST_SHADOW_ALTITUDE_DEG * Math.PI) / 180);
