@@ -559,6 +559,8 @@ try {
       origin === null
         ? []
         : currentTrees().map((tree) => ({ ...tree, at: projectToLocal(tree.at, origin) }));
+    // Outside Calgary, or before the city's trees arrive, there is nothing to edit.
+    treeEditor.setAvailable(origin !== null && (cityTrees.length > 0 || specs.length > 0));
     const ringed = treeEditor.editing() ? selectedTreeId : null;
     trees = createTreeGroup(specs, ringed);
     scene.add(trees);

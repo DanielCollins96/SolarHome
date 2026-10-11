@@ -24,12 +24,15 @@ export function mountTreeEditor(
   },
 ): {
   editing: () => boolean;
+  /** Show the editor only where there are trees to edit. Hiding it also ends editing. */
+  setAvailable: (available: boolean) => void;
   /** Null when no tree is selected. */
   setSelected: (tree: SelectedTree | null) => void;
   setNote: (note: string) => void;
 } {
   const block = document.createElement('section');
   block.className = 'tree-editor';
+  block.hidden = true;
   block.innerHTML = `
     <div class="tree-head">
       <button id="tree-edit" type="button" aria-pressed="false">Edit trees</button>
@@ -72,12 +75,14 @@ export function mountTreeEditor(
   const note = required<HTMLElement>(block, '#tree-note');
   let editing = false;
 
-  toggle.addEventListener('click', () => {
-    editing = !editing;
+  const setEditing = (next: boolean) => {
+    if (next === editing) return;
+    editing = next;
     toggle.setAttribute('aria-pressed', String(editing));
     body.hidden = !editing;
     options.onToggle(editing);
-  });
+  };
+  toggle.addEventListener('click', () => setEditing(!editing));
   kindSelect.addEventListener('change', () => options.onKind(kindSelect.value === 'evergreen' ? 'evergreen' : 'deciduous'));
   required<HTMLButtonElement>(block, '#tree-narrower').addEventListener('click', () => options.onWidth(1 / 1.15));
   required<HTMLButtonElement>(block, '#tree-wider').addEventListener('click', () => options.onWidth(1.15));
@@ -88,6 +93,10 @@ export function mountTreeEditor(
 
   return {
     editing: () => editing,
+    setAvailable(available) {
+      block.hidden = !available;
+      if (!available) setEditing(false);
+    },
     setSelected(tree) {
       selected.hidden = tree === null;
       if (tree === null) return;

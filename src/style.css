@@ -745,6 +745,7 @@ label.file input {
 }
 
 /* The grid layouts above would otherwise show these while they are hidden. */
+.tree-editor[hidden],
 #tree-body[hidden],
 #tree-selected[hidden] {
   display: none;
