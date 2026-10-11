@@ -128,6 +128,18 @@ describe('height and roof tags', () => {
     expect(unknown.issues[0]).toContain('dome');
   });
 
+  it('guesses a flat roof for a large building with no roof tag, a gable for a house', () => {
+    const large = [
+      { east: -60, north: -40 },
+      { east: 60, north: -40 },
+      { east: 60, north: 40 },
+      { east: -60, north: 40 },
+    ];
+    expect(estimateRoof({}, large).roof.type).toBe('flat');
+    expect(estimateRoof({ 'roof:shape': 'many' }, large).roof.type).toBe('flat');
+    expect(estimateRoof({}, rectangle).roof.type).toBe('gable');
+  });
+
   it('turns a downhill roof direction into a ridge 90° away', () => {
     const roof = estimateRoof({ 'roof:shape': 'gabled', 'roof:direction': '180' }, rectangle).roof;
     expect(roof.directionDeg).toBe(270);

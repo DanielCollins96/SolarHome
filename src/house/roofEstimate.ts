@@ -1,7 +1,7 @@
 import { polygonCentroid, type PlanPoint } from './centering.ts';
 import { parseLengthMeters } from './heightEstimate.ts';
 import type { Provenance, RoofSpec, RoofType } from './houseModel.ts';
-import { distance, largestInset } from './planGeometry.ts';
+import { distance, largestInset, signedArea } from './planGeometry.ts';
 
 export interface RoofEstimate {
   roof: RoofSpec;
@@ -10,6 +10,11 @@ export interface RoofEstimate {
 }
 
 const DEFAULT_PITCH_DEG = 25;
+/**
+ * Above this footprint an untagged roof is guessed flat. A 25° house gable across a building
+ * 100 m wide would add a 20 m roof that almost never exists on offices, malls, or warehouses.
+ */
+const LARGE_FOOTPRINT_M2 = 600;
 
 /**
  * Map OSM roof tags onto flat, shed, gable, or hip.
@@ -32,9 +37,10 @@ export function estimateRoof(tags: Record<string, string>, footprint: readonly P
   const direction = directionFromTags(tags, footprint, type, issues);
   const pitch = pitchFromTags(tags, type, footprint, direction.degrees);
   const knownShape = type !== null;
-  const resolved: RoofType = type ?? 'gable';
+  const large = Math.abs(signedArea([...footprint])) > LARGE_FOOTPRINT_M2;
+  const resolved: RoofType = type ?? (large ? 'flat' : 'gable');
   if (shape !== undefined && !knownShape) {
-    issues.push(`Roof shape "${shape}" is not one of the four presets, so this is a gable.`);
+    issues.push(`Roof shape "${shape}" is not one of the four presets, so this is ${resolved === 'flat' ? 'flat' : 'a gable'}.`);
   }
   return {
     roof: {
@@ -50,7 +56,9 @@ export function estimateRoof(tags: Record<string, string>, footprint: readonly P
         ? 'Building part or tower with no roof shape tag. Flat, as OSM 3D buildings assume.'
         : knownShape
           ? undefined
-          : 'No roof shape tag. Using a 25° gable along the longest wall.',
+          : large
+            ? 'No roof shape tag. A building this large is drawn flat.'
+            : 'No roof shape tag. Using a 25° gable along the longest wall.',
     },
     issues,
   };
