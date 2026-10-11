@@ -8,6 +8,7 @@ import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 import type { HouseModel } from '../house/houseModel.ts';
 import { createModelLayer } from './modelLayer.ts';
+import type { SunDirection } from '../sun/sunPosition.ts';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
 setWorkerUrl(maplibreWorkerUrl);
@@ -40,6 +41,8 @@ export interface MapController {
   setFootprints(rings: readonly { ring: readonly LngLat[]; heightM: number | null; baseM?: number }[]): void;
   /** Draw the selection as its 3D model, roofs included. Null goes back to plain footprints. */
   setModel(model: HouseModel | null): void;
+  /** Point the model's light at the sun, so its shadow on the map matches the 3D view. */
+  setSun(sun: SunDirection): void;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -374,6 +377,9 @@ export function mountMap(
       modelShown = model !== null;
       modelLayer.setModel(model);
       showBlocks();
+    },
+    setSun(sun) {
+      modelLayer.setSun(sun);
     },
     setOsmRing(ring) {
       osmRing = ring.map((point) => ({ ...point }));

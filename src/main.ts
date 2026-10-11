@@ -188,6 +188,7 @@ try {
         : zonedLocalToDate(year, month, day, hour, minute, site.timeZone);
     const sun = sunDirection(instant, site.latitude, site.longitude);
     sunNow = sun;
+    map.setSun(sun);
     placeSun(sunLight, sun, sun.altitudeDeg, orbitTarget, Math.max(50, viewRadius * 4));
     placeSunMarker(sunMarker, sun, sun.altitudeDeg, orbitTarget, camera);
     placeSunArrow(sunArrow, sun, sun.altitudeDeg, orbitTarget, Math.max(16, viewRadius * 2.4));
