@@ -7,13 +7,15 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "npm test && wrangler deploy"
   },
   "devDependencies": {
     "@types/three": "^0.186.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.86.0"
   },
   "dependencies": {
     "@photostructure/tz-lookup": "^11.7.0",
