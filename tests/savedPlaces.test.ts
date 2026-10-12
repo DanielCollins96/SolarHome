@@ -54,6 +54,32 @@ describe('saved places', () => {
     expect(places.recent()[0]?.label).toBe(`P${MAX_RECENT + 2}`);
   });
 
+  it('keeps saved places across page loads, newest first, until removed', () => {
+    const storage = memoryStorage();
+    const places = createSavedPlaces(storage);
+    places.save({ label: 'Cabin', at: { latitude: 51.18, longitude: -115.57 }, buildings: [building('way/4', 51.18, -115.57)] });
+    const office = places.save({ label: 'Office', at: calgary, buildings: [building('way/1', 51.0447, -114.0719)] });
+    expect(createSavedPlaces(storage).saved().map((place) => place.label)).toEqual(['Office', 'Cabin']);
+    places.unsave(office.id);
+    expect(createSavedPlaces(storage).saved().map((place) => place.label)).toEqual(['Cabin']);
+  });
+
+  it('saves the same place once, and leaves it when the history forgets it', () => {
+    const places = createSavedPlaces(memoryStorage());
+    const visited = places.visit({ label: 'A', at: calgary, buildings: [building('way/1', 51.0447, -114.0719)] });
+    places.save({ label: 'A', at: calgary, buildings: [building('way/1', 51.0447, -114.0719)] });
+    places.save({ label: 'A and garage', at: calgary, buildings: [building('way/1', 51.0447, -114.0719), building('way/3', 51.0447, -114.0718)] });
+    places.forget(visited.id);
+    expect(places.saved().map((place) => place.label)).toEqual(['A and garage']);
+    expect(places.recent()).toEqual([]);
+  });
+
+  it('reads a store from before saved places existed', () => {
+    const storage = memoryStorage();
+    storage.setItem('solarhome.places.v1', JSON.stringify({ home: null, recent: [] }));
+    expect(createSavedPlaces(storage).saved()).toEqual([]);
+  });
+
   it('ignores a damaged store', () => {
     const storage = memoryStorage();
     storage.setItem('solarhome.places.v1', '{not json');

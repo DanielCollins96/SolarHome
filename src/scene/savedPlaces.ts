@@ -2,7 +2,7 @@ import type { GeographicBuilding } from '../house/assemble.ts';
 import type { LngLat } from '../geo/projection.ts';
 import { projectToLocal } from '../geo/projection.ts';
 
-/** A selection the person can go back to: their home, or a place they looked at. */
+/** A selection the person can go back to: their home, a place they saved, or a place they looked at. */
 export interface SavedPlace {
   id: string;
   label: string;
@@ -17,6 +17,8 @@ export type PlaceInput = Omit<SavedPlace, 'id' | 'savedAt'>;
 
 interface StoredPlaces {
   home: SavedPlace | null;
+  /** Places the person chose to keep, newest first. Kept until removed. */
+  saved: SavedPlace[];
   recent: SavedPlace[];
 }
 
@@ -27,7 +29,7 @@ const MAX_BUILDINGS_CHARS = 120_000;
 /** A visit this close to an earlier one, or sharing a building with it, is the same place. */
 const SAME_PLACE_M = 60;
 
-/** The person's home and recently visited places. Kept in this browser only. */
+/** The person's home, saved places and recently visited places. Kept in this browser only. */
 export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> | null = browserStorage(), now: () => number = Date.now) {
   let places = load(storage);
   let counter = 0;
@@ -36,11 +38,16 @@ export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> 
     try {
       storage?.setItem(STORAGE_KEY, JSON.stringify(places));
     } catch {
-      // Storage full. Keep the home whole and drop the buildings from the history, which can be looked up again.
+      // Storage full. Keep the home whole and drop buildings, which can be looked up again: the history's first, then the saved places'.
+      const recent = places.recent.map(withoutBuildings);
       try {
-        storage?.setItem(STORAGE_KEY, JSON.stringify({ ...places, recent: places.recent.map(({ buildings: _, ...rest }) => rest) }));
+        storage?.setItem(STORAGE_KEY, JSON.stringify({ ...places, recent }));
       } catch {
-        // Storage blocked. The places still hold for this visit.
+        try {
+          storage?.setItem(STORAGE_KEY, JSON.stringify({ ...places, saved: places.saved.map(withoutBuildings), recent }));
+        } catch {
+          // Storage blocked. The places still hold for this visit.
+        }
       }
     }
   };
@@ -54,6 +61,7 @@ export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> 
 
   return {
     home: (): SavedPlace | null => places.home,
+    saved: (): readonly SavedPlace[] => places.saved,
     recent: (): readonly SavedPlace[] => places.recent,
     setHome(input: PlaceInput): SavedPlace {
       places.home = make(input);
@@ -64,6 +72,17 @@ export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> 
       places.home = null;
       save();
     },
+    /** Keep a place, at the top of the saved places, replacing an earlier save of the same place. */
+    save(input: PlaceInput): SavedPlace {
+      const place = make(input);
+      places.saved = [place, ...places.saved.filter((item) => !samePlace(item, place))];
+      save();
+      return place;
+    },
+    unsave(id: string): void {
+      places.saved = places.saved.filter((item) => item.id !== id);
+      save();
+    },
     /** Put a place at the top of the history, replacing an earlier visit to the same place. */
     visit(input: PlaceInput): SavedPlace {
       const place = make(input);
@@ -72,10 +91,11 @@ export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> 
       return place;
     },
     rename(id: string, label: string): void {
-      const matches = [places.home, ...places.recent].filter((item) => item?.id === id);
+      const matches = [places.home, ...places.saved, ...places.recent].filter((item) => item?.id === id);
       for (const item of matches) if (item !== null) item.label = label;
       if (matches.length > 0) save();
     },
+    /** Remove a place from the history. */
     forget(id: string): void {
       places.recent = places.recent.filter((item) => item.id !== id);
       save();
@@ -101,15 +121,21 @@ export function samePlace(a: Pick<SavedPlace, 'at' | 'buildings'>, b: Pick<Saved
 function load(storage: Pick<Storage, 'getItem'> | null): StoredPlaces {
   try {
     const raw = storage?.getItem(STORAGE_KEY);
-    if (raw === null || raw === undefined) return { home: null, recent: [] };
+    if (raw === null || raw === undefined) return { home: null, saved: [], recent: [] };
     const parsed = JSON.parse(raw) as Partial<StoredPlaces>;
     return {
       home: isPlace(parsed.home) ? parsed.home : null,
+      // Stores written before saved places existed have none.
+      saved: Array.isArray(parsed.saved) ? parsed.saved.filter(isPlace) : [],
       recent: Array.isArray(parsed.recent) ? parsed.recent.filter(isPlace) : [],
     };
   } catch {
-    return { home: null, recent: [] };
+    return { home: null, saved: [], recent: [] };
   }
+}
+
+function withoutBuildings({ buildings: _, ...rest }: SavedPlace): SavedPlace {
+  return rest;
 }
 
 function isPlace(value: unknown): value is SavedPlace {

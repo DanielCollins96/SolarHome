@@ -227,6 +227,13 @@ try {
       refreshPlaces();
       address.setMessage('Home forgotten.');
     },
+    onToggleSaved: () => {
+      void toggleSaved();
+    },
+    onUnsave: (place) => {
+      places.unsave(place.id);
+      refreshPlaces();
+    },
     onForget: (place) => {
       places.forget(place.id);
       refreshPlaces();
@@ -774,11 +781,42 @@ try {
     address.setMessage(`Saved ${home.label} as home. It opens here next time.`);
   }
 
+  async function toggleSaved(): Promise<void> {
+    if (picked.length === 0) return;
+    const existing = savedHere();
+    if (existing !== undefined) {
+      places.unsave(existing.id);
+      refreshPlaces();
+      address.setMessage(`Removed ${existing.label} from saved places.`);
+      return;
+    }
+    const before = picked;
+    const place = await currentPlace();
+    // The selection changed during the address lookup. Saving the old one would surprise.
+    if (picked !== before) return;
+    const kept = places.save(place);
+    placeLabel = kept.label;
+    refreshPlaces();
+    address.setMessage(`Saved ${kept.label}. Find it under Places.`);
+  }
+
+  /** The saved place the selection is, if it is one. */
+  function savedHere(): SavedPlace | undefined {
+    if (picked.length === 0) return undefined;
+    const here = { at: model.origin, buildings: picked };
+    return places.saved().find((place) => samePlace(place, here));
+  }
+
   function refreshPlaces(): void {
     const home = places.home();
-    placesPanel.setPlaces(home, places.recent());
+    placesPanel.setPlaces(home, places.saved(), places.recent());
     const here = { at: model.origin, buildings: picked };
-    placesPanel.setSelection(picked.length === 0 ? 'none' : home !== null && samePlace(home, here) ? 'home' : 'other');
+    const selected = picked.length > 0;
+    placesPanel.setSelection({
+      selected,
+      home: selected && home !== null && samePlace(home, here),
+      saved: savedHere() !== undefined,
+    });
   }
 
   /** Select a saved place again. Its buildings are kept, so this needs no lookup unless they were too large to store. */
@@ -793,6 +831,8 @@ try {
       return;
     }
     picked = [];
+    // The flight frames the outlines on the map, which are still the place being left.
+    map.setFootprints([]);
     map.flyTo(place.at.longitude, place.at.latitude);
     void runPick(place.at);
   }
@@ -831,8 +871,6 @@ try {
   let highlighted: Group | null = null;
   const buildingGroupAt = (event: { clientX: number; clientY: number }): Group | null => {
     const rect = canvas.getBoundingClientRect();
-    // The flight frames the outlines on the map, which are still the place being left.
-    map.setFootprints([]);
     if (rect.width <= 0 || rect.height <= 0) return null;
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;

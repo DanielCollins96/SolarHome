@@ -776,16 +776,29 @@ label.file input {
   background: #fff;
 }
 
-#panel .places-row #show-recent {
+#panel .places-row #show-places {
   margin-left: auto;
 }
 
-#go-home svg {
+#go-home svg,
+#save-place svg {
   width: 15px;
   height: 15px;
 }
 
-#recent-list {
+#save-place svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+#save-place[aria-pressed='true'] svg {
+  fill: #e0a400;
+  stroke: #e0a400;
+}
+
+#places-list {
   position: absolute;
   z-index: 6;
   left: 0;
@@ -801,16 +814,25 @@ label.file input {
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
 }
 
-#recent-list[hidden] {
+#places-list[hidden] {
   display: none;
 }
 
-#recent-list li {
+#places-list .places-heading {
+  padding: 6px 8px 2px;
+  color: #6b7785;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#places-list li {
   display: flex;
   align-items: center;
 }
 
-#panel #recent-list .recent-go {
+#panel #places-list .place-go {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
@@ -820,7 +842,7 @@ label.file input {
   text-align: left;
 }
 
-#recent-list .recent-go span {
+#places-list .place-go span {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -828,12 +850,12 @@ label.file input {
   font-size: 13px;
 }
 
-#recent-list .recent-go small {
+#places-list .place-go small {
   color: #6b7785;
   font-size: 11px;
 }
 
-#panel #recent-list .recent-forget {
+#panel #places-list .place-forget {
   flex: none;
   width: 28px;
   height: 28px;
