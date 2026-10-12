@@ -101,6 +101,7 @@ export function mountMap(
     // The City of Calgary's open-data licence asks for credit where its heights and trees are used.
     attributionControl: { customAttribution: CALGARY_CREDIT },
   });
+  map.once('load', () => loadedMaps.add(map));
   let vertices: LngLat[] = [];
   let footprints: LngLat[][] = [];
   let footprintHeights: number[] = [];
@@ -485,15 +486,11 @@ export function mountMap(
       hideGroundBox(map);
     },
     flyTo(longitude, latitude) {
-      focusOutline(map, footprints.length > 0 ? footprints : [vertices], longitude, latitude);
+      const rings = footprints.length > 0 ? footprints : [vertices];
+      whenLoaded(map, () => focusOutline(map, rings, longitude, latitude));
     },
     previewPlace(longitude, latitude) {
-      const show = () => map.flyTo({ center: [longitude, latitude], zoom: 16 });
-      if (!map.isStyleLoaded()) {
-        map.once('load', show);
-        return;
-      }
-      show();
+      whenLoaded(map, () => map.flyTo({ center: [longitude, latitude], zoom: 16 }));
     },
     setBearing(degrees) {
       map.setBearing(degrees);
@@ -815,11 +812,19 @@ function mountMapHelp(container: HTMLElement): {
   };
 }
 
+/** Maps that have fired their one 'load' event. */
+const loadedMaps = new WeakSet<MapLibreMap>();
+
+/**
+ * Run once the map has first loaded. isStyleLoaded() is no test for that: it is false again
+ * whenever tiles are loading or a source has just changed, and 'load' never fires a second time.
+ */
+function whenLoaded(map: MapLibreMap, run: () => void): void {
+  if (loadedMaps.has(map)) run();
+  else map.once('load', run);
+}
+
 function focusOutline(map: MapLibreMap, rings: readonly (readonly LngLat[])[], longitude: number, latitude: number): void {
-  if (!map.isStyleLoaded()) {
-    map.once('load', () => focusOutline(map, rings, longitude, latitude));
-    return;
-  }
   const points = rings.flat();
   if (points.length < 2) {
     map.flyTo({ center: [longitude, latitude], zoom: 18 });

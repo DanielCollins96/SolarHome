@@ -831,6 +831,8 @@ try {
   let highlighted: Group | null = null;
   const buildingGroupAt = (event: { clientX: number; clientY: number }): Group | null => {
     const rect = canvas.getBoundingClientRect();
+    // The flight frames the outlines on the map, which are still the place being left.
+    map.setFootprints([]);
     if (rect.width <= 0 || rect.height <= 0) return null;
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
