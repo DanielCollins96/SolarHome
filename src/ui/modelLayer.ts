@@ -26,6 +26,7 @@ import type { HouseModel } from '../house/houseModel.ts';
 import { createBlockGroup } from '../scene/blockMesh.ts';
 import { createTreeGroup, moveTreeMesh, type TreeSpec } from '../scene/treeMesh.ts';
 import { projectToLocal, type LngLat } from '../geo/projection.ts';
+import { disposeHeatOverlay } from '../solar/heatmap.ts';
 import type { SunDirection } from '../sun/sunPosition.ts';
 
 const WALL_RED = 0xd9534f;
@@ -56,6 +57,8 @@ export function createModelLayer(id: string): {
   setNeighbours: (blocks: readonly { ring: readonly LngLat[]; heightM: number; baseM: number }[]) => void;
   /** Move one drawn tree while it is dragged. */
   moveTree: (id: string, at: PlanPoint) => void;
+  /** The solar heatmap over the roofs, in the model's metres. Null takes it away. */
+  setHeat: (overlay: Group | null) => void;
   /** The tree under a point on the map canvas, and where that point meets the ground, in model metres. */
   pick: (x: number, y: number) => { treeId: string | null; ground: PlanPoint | null };
 } {
@@ -67,6 +70,8 @@ export function createModelLayer(id: string): {
   scene.add(trees);
   const neighbours = new Group();
   scene.add(neighbours);
+  const heat = new Group();
+  scene.add(heat);
   let origin: LngLat | null = null;
   let neighbourBlocks: readonly { ring: readonly LngLat[]; heightM: number; baseM: number }[] = [];
   const fill = new AmbientLight(0xffffff, FILL_LIGHT);
@@ -200,6 +205,14 @@ export function createModelLayer(id: string): {
       neighbourBlocks = blocks;
       drawNeighbours();
       fitBounds();
+    },
+    setHeat(overlay) {
+      for (const child of [...heat.children]) {
+        heat.remove(child);
+        if (child instanceof Group) disposeHeatOverlay(child);
+      }
+      if (overlay !== null) heat.add(overlay);
+      repaint();
     },
     moveTree(id, at) {
       moveTreeMesh(trees, id, at);

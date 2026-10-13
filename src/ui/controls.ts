@@ -23,8 +23,11 @@ export interface SunReadout {
 export interface ControlsHandle {
   setReadout(readout: SunReadout): void;
   setStatus(message: string): void;
-  setSite(lede: string, meta: string): void;
+  /** `at`, when given, adds a link that opens the place in Google Maps. */
+  setSite(lede: string, meta: string, at?: { latitude: number; longitude: number }): void;
   setView(view: 'map' | 'plane'): void;
+  /** Marks sunrise and sunset on the time slider, in minutes since local midnight. Null hides a mark. */
+  setDaylight(sunrise: number | null, sunset: number | null): void;
   tools: HTMLElement;
 }
 
@@ -46,7 +49,7 @@ export function mountControls(
         <button id="show-map" type="button" aria-pressed="true">Map</button>
         <button id="show-plane" type="button" aria-pressed="false">3D</button>
       </div>
-      <button id="fold-panel" type="button" aria-expanded="true" aria-label="Hide controls">${CHEVRON}</button>
+      <button id="fold-panel" type="button" aria-expanded="true" aria-label="Show fewer controls">${CHEVRON}</button>
     </div>
     <div id="panel-body" class="bar">
       <div id="tools"></div>
@@ -57,7 +60,11 @@ export function mountControls(
       </div>
       <div class="time-row">
         <label class="sr" for="time">Local time</label>
-        <input id="time" type="range" min="0" max="1439" step="1" value="${clock.minutes}" aria-label="Local time" />
+        <div class="time-track">
+          <input id="time" type="range" min="0" max="1439" step="1" value="${clock.minutes}" aria-label="Local time" />
+          <span id="sunrise-flag" class="sun-flag" hidden><span class="sr">Sunrise</span><span class="sun-flag-time"></span></span>
+          <span id="sunset-flag" class="sun-flag" hidden><span class="sr">Sunset</span><span class="sun-flag-time"></span></span>
+        </div>
         <button id="play-time" type="button" aria-pressed="false" aria-label="Play">${PLAY_ICON}</button>
         <button id="solar-noon" type="button" aria-label="Solar noon">${SUN_ICON}</button>
       </div>
@@ -92,10 +99,18 @@ export function mountControls(
   const showPlane = required<HTMLButtonElement>(panel, '#show-plane');
   const playButton = required<HTMLButtonElement>(panel, '#play-time');
   const foldButton = required<HTMLButtonElement>(panel, '#fold-panel');
+  const sunriseFlag = required<HTMLElement>(panel, '#sunrise-flag');
+  const sunsetFlag = required<HTMLElement>(panel, '#sunset-flag');
+  const placeFlag = (flag: HTMLElement, minutes: number | null, arrow: string) => {
+    flag.hidden = minutes === null;
+    if (minutes === null) return;
+    flag.style.setProperty('--at', String(minutes / 1439));
+    required<HTMLElement>(flag, '.sun-flag-time').textContent = `${arrow} ${formatMinutes(minutes)}`;
+  };
   foldButton.addEventListener('click', () => {
     const collapsed = panel.classList.toggle('collapsed');
     foldButton.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    foldButton.setAttribute('aria-label', collapsed ? 'Show controls' : 'Hide controls');
+    foldButton.setAttribute('aria-label', collapsed ? 'Show all controls' : 'Show fewer controls');
   });
   const setView = (view: 'map' | 'plane') => {
     showMap.setAttribute('aria-pressed', view === 'map' ? 'true' : 'false');
@@ -182,11 +197,24 @@ export function mountControls(
     setStatus(message) {
       status.textContent = message;
     },
-    setSite(ledeText, metaText) {
+    setSite(ledeText, metaText, at) {
       lede.textContent = ledeText;
       meta.textContent = metaText;
+      if (at !== undefined) {
+        const link = document.createElement('a');
+        link.className = 'maps-link';
+        link.href = `https://www.google.com/maps/search/?api=1&query=${at.latitude.toFixed(6)},${at.longitude.toFixed(6)}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'Google Maps';
+        meta.append(' · ', link);
+      }
     },
     setView,
+    setDaylight(sunrise, sunset) {
+      placeFlag(sunriseFlag, sunrise, '↑');
+      placeFlag(sunsetFlag, sunset, '↓');
+    },
     tools,
   };
 }

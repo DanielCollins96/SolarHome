@@ -1,6 +1,6 @@
 # SolarHome
 
-Browser tool for a real house outline, a centered 3D model, and live sun shadows. This repository is at **milestone 2**: address search, OpenStreetMap footprints, roof presets, and map tracing. Annual exposure and screenshot tracing are not started.
+Browser tool for a real house outline, a centered 3D model, and live sun shadows. This repository is at **milestone 2**: address search, OpenStreetMap footprints, roof presets, and map tracing. A **Solar heatmap** scores each 1 m roof square by a clear-sky year of sun, with shade from the building, its neighbours and trees. Screenshot tracing is not started.
 
 ## Run
 

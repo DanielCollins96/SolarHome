@@ -31,6 +31,14 @@ describe('tree edits', () => {
     expect(edits.apply([])).toEqual([]);
   });
 
+  it('plants a copy with its own height, which outlasts a reload and leaves the original alone', () => {
+    const storage = memoryStorage();
+    const edits = createTreeEdits(storage);
+    const copy = edits.plant({ latitude: 50.9632, longitude: -114.0416 }, 'evergreen', 6, 17);
+    expect(copy.heightM).toBe(17);
+    expect(createTreeEdits(storage).apply([spruce])).toEqual([spruce, copy]);
+  });
+
   it('moves a city tree, then moves and resizes it again from its new place', () => {
     const storage = memoryStorage();
     const edits = createTreeEdits(storage);

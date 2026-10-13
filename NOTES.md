@@ -20,6 +20,10 @@ Running log of decisions, known issues, and benchmark results. Through milestone
 - **Mesh:** the gable floor uses the same ridge-split ring as the walls so every edge is shared by two faces. Courtyard holes are walled; they are not cut through a gable or hip roof.
 - **Map:** OpenFreeMap Liberty vector tiles. Tracing is off until **Edit outline**, so the map can pan. Satellite tracing waits for a later milestone because of imagery licensing.
 
+- **Solar heatmap:** each flat roof face is covered with 1 m squares measured along the slope, starting at the eaves. Each square is scored by a year of clear-sky sunlight (one mid-month day per month, every 15 minutes, UTC, so time zones do not matter), as a share of an unshaded panel tilted to the latitude (capped at 60°) facing the equator. Direct light is traced to the sun at every sample; sky light is split the Hay–Davies way: a circumsolar part, in proportion to how clear the sky is (DNI over light above the atmosphere), that falls like the beam and is blocked with it, and an even part seen through 64 cosine-weighted rays per square; ground reflection uses albedo 0.2 and is not shaded. Clear sky is Meinel beam with Kasten–Young air mass and Haurwitz total. Shade comes from the selected buildings, the map's neighbour blocks (map view data, also used in 3D) and the trees. Spruce passes 10% of the light, broadleaf 20% in leaf and 60% bare (November–April north of the equator). Rays run in a Web Worker against a small BVH in `src/solar/rays.ts`. Toronto City Hall, about 15,600 squares, takes about 4 s.
+- **Weather:** PVGIS `MRcalc` monthly totals on level ground and their diffuse share (`horirrad=1&d2g=1`), averaged over the record's years. NSRDB first (2005–2015, the Americas), ERA5 where NSRDB answers 400. Each month's cloudless beam and sky light are scaled separately so the month's level-ground totals match; the sun path, and so the shadows, are unchanged. Through `/api/pvgis/MRcalc` on both proxies, since PVGIS refuses browser calls. Cached by 0.02° in IndexedDB. A failed lookup falls back to the cloudless year and says so. Checked against PVGIS `PVcalc` at Calgary (NSRDB, kWh/m²·yr, SolarHome vs PVGIS): flat 1,268 vs 1,268; SE 25° 1,438 vs 1,456; S 51° 1,558 vs 1,580; W 35° 1,182 vs 1,181; N 30° 799 vs 826. Toronto W 25° 1,290 vs 1,294, S 44° 1,508 vs 1,532. An isotropic sky alone read tilted south faces 4–6% low; Hay–Davies brought that to 1–2%. The readout and panel give clouds' share as each face's open-sky year with the record against without.
+- **Panel output:** 0.21 kW per m² of panel × performance ratio 0.8, matching PVGIS's estimate with 14% system loss (about 1,160 kWh per kW for a SE 25° roof in Calgary). Shown only with real weather.
+
 ## Live lookups
 
 Checked on 2026-10-10. Areas are the cleaned footprint.
@@ -43,7 +47,8 @@ In the browser, Willow Street loaded at 99.0 m² and 14.9 m eaves. Choosing it a
 - Searched houses ignore daylight saving. Summer shadows are about an hour off in regions that observe it.
 - OSM `height` is applied as the eave even when the tag means the top of the roof.
 - A hip or gable roof does not cut a hole for a courtyard.
-- No benchmark numbers yet. The harness arrives with the exposure pass.
+- Without the weather record the heatmap is a cloudless year, about 25–45% above a real one, and gives no panel output.
+- A domed or curved roof is many small faces, so its squares are cut into slivers along the facets.
 
 ## Benchmarks
 

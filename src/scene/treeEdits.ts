@@ -73,8 +73,9 @@ export function createTreeEdits(storage: Pick<Storage, 'getItem' | 'setItem'> | 
       });
       return [...kept, ...edits.added];
     },
-    plant(at: LngLat, kind: TreeKind, widthM: number): PlacedTree {
-      const tree = { id: `planted:${Date.now().toString(36)}-${(counter += 1)}`, at, kind, widthM };
+    /** A new tree. A height left out follows from the width and kind, like the city's trees. */
+    plant(at: LngLat, kind: TreeKind, widthM: number, heightM?: number): PlacedTree {
+      const tree: PlacedTree = { id: `planted:${Date.now().toString(36)}-${(counter += 1)}`, at, kind, widthM, ...(heightM === undefined ? {} : { heightM }) };
       edits.added.push(tree);
       save();
       return tree;

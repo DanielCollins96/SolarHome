@@ -1,5 +1,5 @@
 import './style.css';
-import { Box3, Group, Line, Mesh, MeshLambertMaterial, Plane, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, Group, Line, LineBasicMaterial, LineLoop, Mesh, MeshLambertMaterial, Plane, PlaneGeometry, Raycaster, Sprite, Vector2, Vector3, type Material, type Object3D } from 'three';
 import { assembleBuildings, assembleHouse, assembleTrace, type GeographicBuilding } from './house/assemble.ts';
 import { demoHouseModel } from './house/demoHouse.ts';
 import { createHouseObject, partTopHeight } from './house/houseMesh.ts';
@@ -15,7 +15,7 @@ import { createNeighbourGroup } from './scene/neighbourMesh.ts';
 import { createNorthArrow } from './scene/northArrow.ts';
 import { createSavedPlaces, samePlace, type SavedPlace } from './scene/savedPlaces.ts';
 import { createTreeEdits, MAX_TREE_HEIGHT_M, MAX_TREE_WIDTH_M, MIN_TREE_HEIGHT_M, MIN_TREE_WIDTH_M, type PlacedTree } from './scene/treeEdits.ts';
-import { createTreeGroup, moveTreeMesh, planTrees, treeHeightOf, type TreeCrown, type TreeKind, type TreePoint } from './scene/treeMesh.ts';
+import { createTreeGroup, moveTreeMesh, planTrees, treeHeightOf, type TreeCrown, type TreeKind, type TreePoint, type TreeSpec } from './scene/treeMesh.ts';
 import type { PlanPoint } from './house/centering.ts';
 import { pointInRing } from './house/planGeometry.ts';
 import {
@@ -36,6 +36,8 @@ import {
   resizeRenderer,
 } from './scene/sceneSetup.ts';
 import {
+  daylightLocalMinutes,
+  daylightMinutesAtOffset,
   shadowCardinalLabel,
   shadowFallDirection,
   solarNoonLocalMinutes,
@@ -47,6 +49,16 @@ import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, timeZoneAt, zo
 import { mountAddressSearch } from './ui/addressSearch.ts';
 import { mountPlacesPanel } from './ui/placesPanel.ts';
 import { mountTreeEditor } from './ui/treeEditor.ts';
+import { mountHeatPanel } from './ui/heatPanel.ts';
+import { idealNormal, openPlaneYield, skySamples, type SkySamples } from './solar/exposure.ts';
+import { createExposureRunner } from './solar/exposureRunner.ts';
+import { cellAtUv, cellCorners, cellSamples, roofTotal, collectOccluders, createHeatOverlay, disposeHeatOverlay, summarizeHeat } from './solar/heatmap.ts';
+import { mountCellReadout } from './ui/cellReadout.ts';
+import { mountContextMenu } from './ui/contextMenu.ts';
+import type { ExposureResult } from './solar/exposure.ts';
+import type { RoofGrid } from './solar/roofCells.ts';
+import { roofGrid } from './solar/roofCells.ts';
+import { applyWeather, loadMonthlyWeather, type MonthlyWeather } from './solar/weather.ts';
 import { mountCompass, mountSunBadge } from './ui/compass.ts';
 import { DEFAULT_CLOCK, mountControls } from './ui/controls.ts';
 import { mountMap, type AreaBounds, type PickedFootprint } from './ui/mapView.ts';
@@ -58,7 +70,10 @@ const stage = document.querySelector<HTMLElement>('#stage');
 if (!app || !canvas || !mapHost || !stage) throw new Error('The page layout is missing.');
 
 const clock = { ...DEFAULT_CLOCK };
-const compass = mountCompass(stage);
+/** How long the view takes to swing round when the compass is clicked. */
+const COMPASS_TURN_MS = 700;
+let faceBearing = (_bearingDeg: number) => {};
+const compass = mountCompass(stage, (bearingDeg) => faceBearing(bearingDeg));
 const sunBadge = mountSunBadge(stage);
 let updateSun = () => {};
 let showView = (_view: 'map' | 'plane') => {};
@@ -120,6 +135,11 @@ const VISIT_DELAY_MS = 1_500;
 let visitTimer = 0;
 const searchAbort = { current: new AbortController() };
 
+/** Wait this long after the last change to the model, trees or neighbours before tracing the sunlight again. */
+const HEAT_DELAY_MS = 600;
+/** More roof squares than this is a district, and tracing a year of sun over it would take minutes. */
+const MAX_HEAT_CELLS = 60_000;
+
 /** Farther than this from the selection, a building or the map's centre is somewhere else entirely. */
 const DISTANT_SELECTION_M = 8_000;
 
@@ -135,6 +155,20 @@ function solarNoonMinutes(isoDate: string): number {
     return solarNoonLocalMinutes(isoDate, site.latitude, site.longitude, site.timeZone);
   }
   return solarNoonMinutesAtOffset(isoDate, site.latitude, site.longitude, longitudeOffsetMinutes(site.longitude));
+}
+
+/** The date and place the slider's sunrise and sunset marks were last worked out for. */
+let daylightKey = '';
+
+function markDaylight(): void {
+  const key = `${clock.date} ${site.latitude} ${site.longitude} ${site.timeZone}`;
+  if (key === daylightKey) return;
+  daylightKey = key;
+  const { sunrise, sunset } =
+    site.timeZone !== null
+      ? daylightLocalMinutes(clock.date, site.latitude, site.longitude, site.timeZone)
+      : daylightMinutesAtOffset(clock.date, site.latitude, site.longitude, longitudeOffsetMinutes(site.longitude));
+  panel.setDaylight(sunrise, sunset);
 }
 
 try {
@@ -197,6 +231,10 @@ try {
       releaseDistantSelection(center);
     },
     onPlainClick: (hit) => clickTrees(hit),
+    onRightClick: (hit, at) => {
+      if (hit.treeId !== null) openTreeMenu(hit.treeId, at);
+    },
+    onNeighbours: () => scheduleHeat(false),
     treeDrag: {
       start: (hit) => startTreeDrag(hit.treeId),
       move: (ground) => dragTree(ground),
@@ -243,7 +281,7 @@ try {
 
   const treeEditor = mountTreeEditor(panel.tools, {
     onToggle: (editing) => {
-      map.setNote(editing ? 'Editing trees. Click a tree to resize it, drag it to move it, or click open ground to plant one.' : '');
+      map.setNote(editing ? 'Editing trees. Click a tree to resize it, drag it to move it, or click open ground to plant one. Right-click a tree for more.' : '');
       selectTree(null);
     },
     onKind: (kind) => editSelectedTree({ kind }),
@@ -252,10 +290,12 @@ try {
       if (tree === undefined) return;
       editSelectedTree({ widthM: Math.min(MAX_TREE_WIDTH_M, Math.max(MIN_TREE_WIDTH_M, tree.widthM * factor)) });
     },
-    onHeight: (factor) => {
+    onHeight: (stepM) => {
       const tree = selectedTree();
       if (tree === undefined) return;
-      editSelectedTree({ heightM: Math.min(MAX_TREE_HEIGHT_M, Math.max(MIN_TREE_HEIGHT_M, treeHeightOf(tree) * factor)) });
+      // Land on whole and half metres, so a guessed 16.9 m becomes 17.5 m and then 18 m.
+      const next = Math.round((treeHeightOf(tree) + stepM) * 2) / 2;
+      editSelectedTree({ heightM: Math.min(MAX_TREE_HEIGHT_M, Math.max(MIN_TREE_HEIGHT_M, next)) });
     },
     onRemove: () => editSelectedTree({ removed: true }),
     onReset: () => {
@@ -263,6 +303,25 @@ try {
       selectTree(null);
     },
   });
+
+  const heatPanel = mountHeatPanel(panel.tools, {
+    onToggle: (on) => {
+      if (on) scheduleHeat(true, 0);
+      else clearHeat();
+    },
+  });
+  const heatRunner = createExposureRunner();
+  let heatOverlay: Group | null = null;
+  let heatTimer = 0;
+  let heatToken = 0;
+  /** A year of sky for the last place, kept because the sun path only changes with the place. */
+  let heatSky: { key: string; sky: SkySamples; clear: SkySamples; idealKwhPerM2: number; weather: MonthlyWeather | null; weatherNote: string } | null = null;
+  /** The squares and their sunlight behind the overlay on show, for reading one out on a click. */
+  /** `faceCloudLoss` is each roof face's sunlight lost to clouds, null without the weather record. */
+  let heatShown: { grid: RoofGrid; result: ExposureResult; idealKwhPerM2: number; faceCloudLoss: number[] | null } | null = null;
+  const cellReadout = mountCellReadout(stage);
+  /** The clicked square: where its label is pinned, and its outline. */
+  let pickedCell: { point: Vector3; outline: LineLoop } | null = null;
 
   updateSun = () => {
     const { year, month, day } = parseISODate(clock.date);
@@ -274,6 +333,7 @@ try {
         : zonedLocalToDate(year, month, day, hour, minute, site.timeZone);
     const sun = sunDirection(instant, site.latitude, site.longitude);
     sunNow = sun;
+    markDaylight();
     map.setSun(sun);
     // Far enough out that trees on the sun's side are still between the light and the house.
     placeSun(sunLight, sun, sun.altitudeDeg, orbitTarget, Math.max(50, viewRadius * 4, shadowRadius * 3));
@@ -320,6 +380,7 @@ try {
     scene.add(arrow);
     neighbours.visible = false;
     void showTrees(next);
+    scheduleHeat(true);
     if (options.syncMap) {
       map.setModel(next);
       map.setFootprints(
@@ -494,6 +555,7 @@ try {
       map.setModel(null);
       map.setNote('');
       replaceHouse(new Group());
+      scheduleHeat(true);
       address.setClearEnabled(false);
       address.setMessage('Nothing selected. Click a building, or shift-drag a box.');
       return;
@@ -507,7 +569,7 @@ try {
     showHouse(model, { syncMap: true, fly, demo: false, announce: false });
     scheduleVisit();
     const count = picked.length === 1 ? '1 building' : `${picked.length} buildings`;
-    const message = `${count}. ${note} Double-click a building here to remove it, or hover it and press Delete.`;
+    const message = `${count}. ${note} Click a red building on the map to remove it.`;
     address.setMessage(message);
     map.setNote(message);
   }
@@ -577,6 +639,123 @@ try {
     drawTrees();
   }
 
+  function showHeat(overlay: Group | null, forMap: Group | null): void {
+    // A clicked square belongs to the overlay being replaced.
+    unpickCell();
+    heatShown = null;
+    if (heatOverlay !== null) {
+      scene.remove(heatOverlay);
+      disposeHeatOverlay(heatOverlay);
+    }
+    heatOverlay = overlay;
+    if (overlay !== null) scene.add(overlay);
+    map.setHeat(forMap);
+  }
+
+  function clearHeat(): void {
+    window.clearTimeout(heatTimer);
+    heatToken += 1;
+    heatRunner.cancel();
+    showHeat(null, null);
+  }
+
+  /**
+   * Trace the heatmap again after the scene settles. A new model makes the old colours wrong at
+   * once, so they go; a tree or a neighbour only changes the shade, so they stay until replaced.
+   */
+  function scheduleHeat(modelChanged: boolean, delay = HEAT_DELAY_MS): void {
+    if (!heatPanel.on()) return;
+    if (modelChanged) showHeat(null, null);
+    window.clearTimeout(heatTimer);
+    heatTimer = window.setTimeout(() => {
+      void runHeat();
+    }, delay);
+  }
+
+  async function runHeat(): Promise<void> {
+    const token = ++heatToken;
+    const current = model;
+    if (house.children.length === 0 || current.parts.length === 0) {
+      heatRunner.cancel();
+      showHeat(null, null);
+      heatPanel.setMessage('Select a building to see the sunlight on its roof.');
+      return;
+    }
+    const grid = roofGrid(current);
+    if (grid.cells.length === 0) {
+      showHeat(null, null);
+      heatPanel.setMessage('This model has no roof facing the sky.');
+      return;
+    }
+    if (grid.cells.length > MAX_HEAT_CELLS) {
+      showHeat(null, null);
+      heatPanel.setMessage(`That is ${Math.round(grid.cells.length / 1000)},000 m² of roof. Select fewer buildings for a heatmap.`);
+      return;
+    }
+    const { latitude, longitude } = current.origin;
+    const year = parseISODate(clock.date).year;
+    const key = `${latitude.toFixed(3)},${longitude.toFixed(3)},${year}`;
+    if (heatSky?.key !== key) {
+      heatPanel.setMessage('Fetching the weather record for this place…');
+      const clear = skySamples(latitude, longitude, year);
+      let weather: MonthlyWeather | null = null;
+      let weatherNote = '';
+      try {
+        weather = await loadMonthlyWeather(latitude, longitude, { fetch, cache });
+      } catch {
+        weatherNote = 'The weather record could not be loaded, so this is a cloudless year. ';
+      }
+      if (token !== heatToken) return;
+      const sky = weather === null ? clear : applyWeather(clear, weather);
+      heatSky = { key, sky, clear, idealKwhPerM2: openPlaneYield(idealNormal(latitude), sky), weather, weatherNote };
+    }
+    const { sky, clear, idealKwhPerM2, weather, weatherNote } = heatSky;
+    const origin = current.origin;
+    const nearTrees: TreeSpec[] =
+      treeOrigin === origin ? currentTrees().map((tree) => ({ ...tree, at: projectToLocal(tree.at, origin) })) : [];
+    const blocks = map.neighbours().map((block) => ({ ring: projectRing(block.ring, origin), heightM: block.heightM, baseM: block.baseM }));
+    const occluders = collectOccluders(current, nearTrees, blocks);
+    const { points, normals } = cellSamples(grid);
+    heatPanel.setProgress(0);
+    let result;
+    try {
+      result = await heatRunner.run({ points, normals, occluders, sky }, (share) => {
+        if (token === heatToken) heatPanel.setProgress(share);
+      });
+    } catch (error) {
+      if (token === heatToken) heatPanel.setMessage(error instanceof Error ? error.message : 'The sunlight calculation stopped.');
+      return;
+    }
+    if (result === null || token !== heatToken || model !== current) return;
+    const shares = result.kwhPerM2.map((kwh) => kwh / idealKwhPerM2);
+    showHeat(createHeatOverlay(grid, shares), createHeatOverlay(grid, shares));
+    // What clouds take from each face: its open-sky year with the weather record against without.
+    const faceCloudLoss =
+      weather === null ? null : grid.faces.map((face) => Math.max(0, 1 - openPlaneYield(face.normal, sky) / Math.max(openPlaneYield(face.normal, clear), 1e-6)));
+    heatShown = { grid, result, idealKwhPerM2, faceCloudLoss };
+    let roofCloudLoss: number | null = null;
+    if (faceCloudLoss !== null) {
+      let area = 0;
+      let lost = 0;
+      for (const cell of grid.cells) {
+        area += cell.areaM2;
+        lost += (faceCloudLoss[cell.face] ?? 0) * cell.areaM2;
+      }
+      roofCloudLoss = area > 0 ? lost / area : 0;
+    }
+    const tilt = Math.round(Math.min(Math.abs(latitude), 60));
+    const facing = latitude >= 0 ? 'south' : 'north';
+    const ideal = `100% is an unshaded panel tilted ${tilt}° facing ${facing}: ${Math.round(idealKwhPerM2).toLocaleString()} kWh/m² a year here.`;
+    heatPanel.setSummary(
+      summarizeHeat(grid, result, idealKwhPerM2),
+      weather === null
+        ? `${weatherNote}Each 1 m square shows its sunlight, shade included. ${ideal} Real skies are cloudier, so compare squares rather than sizing a system from this.`
+        : `Each 1 m square shows its sunlight in a typical year, after clouds and shade. Clouds come from ${weather.source} weather records for ${weather.firstYear}–${weather.lastYear} (PVGIS © European Union). ${ideal} ` +
+            `Panel output is the electricity solar panels would make: 210 W/m² panels, after 20% losses to heat, wiring and the inverter.`,
+      roofCloudLoss,
+    );
+  }
+
   /** The city's trees with the person's edits, and the trees they planted near the model. */
   function currentTrees(): PlacedTree[] {
     const origin = treeOrigin;
@@ -601,6 +780,7 @@ try {
     trees = createTreeGroup(specs, ringed);
     scene.add(trees);
     map.setTrees(specs, ringed);
+    scheduleHeat(false);
     // Grow the shadow to reach the trees around the model.
     const reach = new Box3().setFromObject(house).union(new Box3().setFromObject(trees));
     const size = reach.getSize(new Vector3());
@@ -662,6 +842,38 @@ try {
       selectTree(planted.id);
     }
     return true;
+  }
+
+  const contextMenu = mountContextMenu();
+
+  /** A right-click on a tree, in the map or in 3D, offers to copy it or take it away. */
+  function openTreeMenu(treeId: string, at: { x: number; y: number }): void {
+    contextMenu.open(at, [
+      { label: 'Duplicate tree', run: () => duplicateTree(treeId) },
+      { label: 'Remove tree', run: () => removeTree(treeId), danger: true },
+    ]);
+  }
+
+  /**
+   * Copy a tree: same kind, width and height, one crown width to the east so the two do not
+   * overlap. Tree editing comes on and the copy is selected, ready to drag into place.
+   */
+  function duplicateTree(treeId: string): void {
+    if (treeOrigin === null) return;
+    const tree = currentTrees().find((item) => item.id === treeId);
+    if (tree === undefined) return;
+    const from = projectToLocal(tree.at, treeOrigin);
+    const at = localToLngLat({ east: from.east + tree.widthM, north: from.north }, treeOrigin);
+    const copy = treeEdits.plant(at, tree.kind, tree.widthM, tree.heightM);
+    treeEditor.startEditing();
+    selectTree(copy.id);
+  }
+
+  function removeTree(treeId: string): void {
+    const tree = currentTrees().find((item) => item.id === treeId);
+    if (tree === undefined) return;
+    treeEdits.update(tree, { removed: true });
+    selectTree(selectedTreeId === treeId ? null : selectedTreeId);
   }
 
   async function runArea(bounds: AreaBounds): Promise<void> {
@@ -849,6 +1061,7 @@ try {
 
   showView = (view) => {
     const mapMain = view === 'map';
+    if (mapMain) unpickCell();
     panel.setView(view);
     mapHost.classList.toggle('primary', mapMain);
     mapHost.classList.toggle('inset', !mapMain);
@@ -960,10 +1173,61 @@ try {
     if (stage.classList.contains('inset') || !treeEditor.editing() || pressedAt === null || pressMoved(event)) return;
     clickTrees(treeHitAt(event));
   });
-  canvas.addEventListener('dblclick', (event) => {
-    if (stage.classList.contains('inset')) return;
-    removeHighlighted(buildingGroupAt(event));
+  // Right-drag turns the view, so only a right-click that stays put opens the tree's menu.
+  canvas.addEventListener('pointerup', (event) => {
+    if (event.button !== 2 || stage.classList.contains('inset') || pressedAt === null || pressMoved(event)) return;
+    const treeId = treeHitAt(event).treeId;
+    if (treeId !== null) openTreeMenu(treeId, { x: event.clientX, y: event.clientY });
   });
+  /** With the heatmap on, a click on a roof square reads out its sunlight. A click elsewhere puts the label away. */
+  const pickCell = (event: { clientX: number; clientY: number }): void => {
+    unpickCell();
+    if (heatOverlay === null || heatShown === null) return;
+    const rect = canvas.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    // A wall or a tree in front of the roof hides the square behind it.
+    const hit = raycaster.intersectObjects([heatOverlay, house, trees], true)[0];
+    const faceIndex: unknown = hit?.object.userData.heatFace;
+    if (hit === undefined || typeof faceIndex !== 'number' || hit.uv === undefined) return;
+    const { grid, result, idealKwhPerM2 } = heatShown;
+    const index = cellAtUv(grid, faceIndex, hit.uv);
+    const cell = grid.cells[index];
+    const face = grid.faces[faceIndex];
+    if (cell === undefined || face === undefined) return;
+    const kwh = result.kwhPerM2[index] ?? 0;
+    const open = result.openKwhPerM2[index] ?? 0;
+    cellReadout.show({
+      share: kwh / idealKwhPerM2,
+      kwhPerM2: kwh,
+      shadeLoss: open > 0 ? Math.max(0, 1 - kwh / open) : 0,
+      tiltDeg: face.tiltDeg,
+      azimuthDeg: face.azimuthDeg,
+      areaM2: cell.areaM2,
+      cloudLoss: heatShown.faceCloudLoss === null ? null : (heatShown.faceCloudLoss[faceIndex] ?? 0),
+      goodShare: 0.8,
+      side: roofTotal(grid, result.kwhPerM2, idealKwhPerM2, { face: faceIndex }),
+      roof: grid.faces.filter((other) => other.building === face.building).length > 1 ? roofTotal(grid, result.kwhPerM2, idealKwhPerM2, { building: face.building }) : null,
+    });
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(cellCorners(grid, index), 3));
+    const outline = new LineLoop(geometry, new LineBasicMaterial({ color: 0xffffff }));
+    outline.renderOrder = 1;
+    scene.add(outline);
+    pickedCell = { point: new Vector3(cell.point.x, cell.point.y, cell.point.z), outline };
+  };
+  canvas.addEventListener('click', (event) => {
+    if (stage.classList.contains('inset') || treeEditor.editing() || pressedAt === null || pressMoved(event)) return;
+    pickCell(event);
+  });
+  function unpickCell(): void {
+    cellReadout.hide();
+    if (pickedCell === null) return;
+    scene.remove(pickedCell.outline);
+    disposeObject(pickedCell.outline);
+    pickedCell = null;
+  }
   window.addEventListener('keydown', (event) => {
     if (event.key !== 'Delete' && event.key !== 'Backspace') return;
     const target = event.target;
@@ -979,8 +1243,43 @@ try {
   });
   showView('map');
 
+  /** A swing of the view round the house, from one compass bearing to another, in radians. */
+  let swing: { from: number; to: number; start: number } | null = null;
+  faceBearing = (bearingDeg) => {
+    const offset = camera.position.clone().sub(controls.target);
+    // The camera looks back along its offset, so it faces this bearing, clockwise from north.
+    const from = Math.atan2(-offset.x, offset.z);
+    let to = (bearingDeg * Math.PI) / 180;
+    // The short way round.
+    while (to - from > Math.PI) to -= 2 * Math.PI;
+    while (to - from < -Math.PI) to += 2 * Math.PI;
+    swing = { from, to, start: performance.now() };
+  };
+  // Grabbing the view takes it back from a swing still under way.
+  canvas.addEventListener('pointerdown', () => {
+    swing = null;
+  });
+  canvas.addEventListener('wheel', () => {
+    swing = null;
+  }, { passive: true });
+
   const frame = () => {
+    if (swing !== null) {
+      const t = Math.min(1, (performance.now() - swing.start) / COMPASS_TURN_MS);
+      const eased = t * t * (3 - 2 * t);
+      const bearing = swing.from + (swing.to - swing.from) * eased;
+      const offset = camera.position.clone().sub(controls.target);
+      const across = Math.hypot(offset.x, offset.z);
+      // Keep the height and the distance; only the side the camera looks from changes.
+      camera.position.set(controls.target.x - Math.sin(bearing) * across, camera.position.y, controls.target.z + Math.cos(bearing) * across);
+      camera.lookAt(controls.target);
+      if (t >= 1) swing = null;
+    }
     controls.update();
+    if (pickedCell !== null) {
+      const screen = pickedCell.point.clone().project(camera);
+      cellReadout.place(screen.z > 1 ? null : { x: ((screen.x + 1) / 2) * canvas.clientWidth, y: ((1 - screen.y) / 2) * canvas.clientHeight });
+    }
     if (sunNow !== null) {
       placeSunMarker(sunMarker, sunNow, sunNow.altitudeDeg, orbitTarget, camera);
       compass.update(camera, sunNow);
@@ -1002,7 +1301,7 @@ function describeSite(lede: string): void {
     `UTC${formatOffset(longitudeOffsetMinutes(site.longitude))} (no daylight saving)`;
   const lat = Math.abs(site.latitude).toFixed(4);
   const lng = Math.abs(site.longitude).toFixed(4);
-  panel.setSite(lede, `${lat}°${site.latitude >= 0 ? 'N' : 'S'}, ${lng}°${site.longitude >= 0 ? 'E' : 'W'} · ${zone}`);
+  panel.setSite(lede, `${lat}°${site.latitude >= 0 ? 'N' : 'S'}, ${lng}°${site.longitude >= 0 ? 'E' : 'W'} · ${zone}`, site);
 }
 
 /** The first two parts of a geocoder label, such as "123 Main Street, Calgary". */

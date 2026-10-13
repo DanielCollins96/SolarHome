@@ -15,7 +15,7 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ];
 
-/** Same-origin stand-in for the Vite dev proxy. Nominatim and Overpass reject anonymous browser calls. */
+/** Same-origin stand-in for the Vite dev proxy. Nominatim, Overpass and PVGIS reject anonymous browser calls. */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -26,6 +26,11 @@ export default {
     if (url.pathname.startsWith('/api/osm/')) {
       // Read-only calls to the main OpenStreetMap API, for single buildings.
       const target = new URL(`https://api.openstreetmap.org/api/0.6${url.pathname.replace(/^\/api\/osm/, '')}${url.search}`);
+      return fetch(target, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
+    }
+    if (url.pathname === '/api/pvgis/MRcalc') {
+      // Monthly sunlight from the EU's PVGIS. It refuses calls from web pages, so they come through here.
+      const target = new URL(`https://re.jrc.ec.europa.eu/api/v5_2/MRcalc${url.search}`);
       return fetch(target, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
     }
     if (url.pathname === '/api/overpass') {

@@ -4,6 +4,8 @@ import {
   shadowCardinalLabel,
   shadowFallDirection,
   solarNoonLocalMinutes,
+  daylightLocalMinutes,
+  daylightMinutesAtOffset,
   sunDirection,
 } from '../src/sun/sunPosition.ts';
 
@@ -71,5 +73,18 @@ describe('sun direction in the scene frame', () => {
     expect(shadow && shadow.z).toBeLessThan(-0.99);
     expect(shadow && Math.abs(shadow.x)).toBeLessThan(0.02);
     expect(shadowCardinalLabel(shadow)).toBe('north');
+  });
+
+  it('gives sunrise and sunset at Golden on the solstice', () => {
+    const { sunrise, sunset } = daylightLocalMinutes('2026-06-21', NREL_LATITUDE, NREL_LONGITUDE, NREL_TIME_ZONE);
+    // About 5:32 and 20:31 Mountain Daylight Time.
+    expect(sunrise).toBeGreaterThan(5 * 60 + 25);
+    expect(sunrise).toBeLessThan(5 * 60 + 40);
+    expect(sunset).toBeGreaterThan(20 * 60 + 25);
+    expect(sunset).toBeLessThan(20 * 60 + 40);
+  });
+
+  it('has no sunrise or sunset under the midnight sun', () => {
+    expect(daylightMinutesAtOffset('2026-06-21', 69.65, 18.96, 60)).toEqual({ sunrise: null, sunset: null });
   });
 });

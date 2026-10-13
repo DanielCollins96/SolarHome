@@ -165,19 +165,28 @@ function addTree(group: Group, kit: TreeKit, at: PlanPoint, kind: TreeKind, widt
   return tree;
 }
 
-/** Spruce: a short bare trunk under overlapping tiers of cones that narrow to a spire. */
+/**
+ * Spruce in a yard: the lowest branches lifted a couple of metres clear of the lawn, the crown
+ * widest a little above them, then narrowing to a spire. Overlapping tiers of cones, each a
+ * little narrower than the one below, so the outline tapers rather than flaring at the bottom.
+ */
 function buildEvergreen(tree: Group, kit: TreeKit, widthM: number, height: number, random: () => number): void {
   const radius = widthM / 2;
-  const bare = height * 0.08;
+  // About 2 m of bare trunk on a grown tree, less on a young one.
+  const bare = Math.min(2.2, height * 0.13);
   add(tree, kit.trunk, kit.bark, radius * 0.08, bare + height * 0.2, 0);
   const material = pick(kit.needles, random);
-  const tiers = 4;
+  const tiers = 5;
   const crown = height - bare;
   for (let tier = 0; tier < tiers; tier += 1) {
     const share = tier / tiers;
-    const tierRadius = radius * (1 - share * 0.72) * (0.92 + random() * 0.16);
-    const tierHeight = crown * (0.42 - share * 0.06);
-    const base = bare + crown * share * 0.78;
+    // The bottom tier is the lifted skirt, a little short of the widest tier above it.
+    const profile = tier === 0 ? 0.86 : 1 - (share - 0.2) * 0.85;
+    const tierRadius = radius * profile * (0.94 + random() * 0.12);
+    // Short, steep cones: a tier's skirt barely spreads past the tier above.
+    const base = bare + crown * share * 0.8;
+    // The top tier runs up to the tree's full height, so the spire is the height the tree is given.
+    const tierHeight = tier === tiers - 1 ? height - base : crown * (0.32 - share * 0.04);
     const cone = new Mesh(kit.cone, material);
     cone.scale.set(tierRadius, tierHeight, tierRadius);
     cone.position.y = base + tierHeight / 2;

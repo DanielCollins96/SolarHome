@@ -33,7 +33,7 @@ export function mountPlacesPanel(
       <button id="go-home" type="button" disabled>${HOME_ICON}<span>Home</span></button>
       <button id="save-home" type="button" disabled>Save as home</button>
       <button id="save-place" type="button" aria-pressed="false" disabled>${STAR_ICON}</button>
-      <button id="show-places" type="button" aria-expanded="false" aria-controls="places-list" disabled>Places</button>
+      <button id="show-places" type="button" aria-expanded="false" aria-controls="places-list" aria-label="Places" title="Places" disabled>${BOOKMARK_ICON}</button>
     </div>
     <ul id="places-list" hidden></ul>
   `;
@@ -85,7 +85,7 @@ export function mountPlacesPanel(
     goHome.disabled = home === null;
     goHome.title = home === null ? 'Save a selection as home first' : `Go to ${home.label}`;
     saveHome.disabled = !selection.selected && home === null;
-    saveHome.textContent = selection.home || (!selection.selected && home !== null) ? 'Forget home' : 'Save as home';
+    saveHome.textContent = selection.home || (!selection.selected && home !== null) ? 'Clear home' : 'Save as home';
     savePlace.disabled = !selection.selected;
     savePlace.setAttribute('aria-pressed', selection.saved ? 'true' : 'false');
     const saveLabel = !selection.selected ? 'Select a building to save it' : selection.saved ? 'Remove from saved places' : 'Save this place';
@@ -104,7 +104,7 @@ export function mountPlacesPanel(
     if (home !== null) options.onGo(home);
   });
   saveHome.addEventListener('click', () => {
-    if (saveHome.textContent === 'Forget home') options.onForgetHome();
+    if (saveHome.textContent === 'Clear home') options.onForgetHome();
     else options.onSaveHome();
   });
   savePlace.addEventListener('click', () => {
@@ -173,3 +173,6 @@ const HOME_ICON =
 
 const STAR_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"/></svg>';
+
+const BOOKMARK_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h11v17L12 16.5l-5.5 4z"/></svg>';

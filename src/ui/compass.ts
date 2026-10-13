@@ -6,11 +6,17 @@ export interface CompassSun {
   altitudeDeg: number;
 }
 
-/** Screen compass. The rose rotates so N keeps pointing at world north (-Z). */
-export function mountCompass(parent: HTMLElement): { update(camera: Camera, sun: CompassSun): void } {
-  const root = document.createElement('div');
+/** Within this many degrees of north, the view counts as facing north, and a click turns it south. */
+const FACING_NORTH_DEG = 10;
+
+/**
+ * Screen compass. The rose rotates so N keeps pointing at world north (-Z). A click turns the
+ * view to face north, or south when it already faces north.
+ */
+export function mountCompass(parent: HTMLElement, onFace: (bearingDeg: 0 | 180) => void): { update(camera: Camera, sun: CompassSun): void } {
+  const root = document.createElement('button');
   root.id = 'compass';
-  root.setAttribute('aria-hidden', 'true');
+  root.type = 'button';
   root.innerHTML = `
     <div class="rose">
       <span class="tick n">N</span>
@@ -26,11 +32,22 @@ export function mountCompass(parent: HTMLElement): { update(camera: Camera, sun:
   const sunMark = root.querySelector<HTMLElement>('.sun-mark');
   if (!rose || !sunMark) throw new Error('Compass rose is missing.');
 
+  let facingNorth = false;
+  root.addEventListener('click', () => onFace(facingNorth ? 180 : 0));
+  // A press on the compass must not also start turning the view underneath it.
+  root.addEventListener('pointerdown', (event) => event.stopPropagation());
   const look = new Vector3();
   return {
     update(camera: Camera, sun: CompassSun) {
       camera.getWorldDirection(look);
       const bearing = Math.atan2(look.x, -look.z);
+      const nowNorth = Math.abs(bearing) < (FACING_NORTH_DEG * Math.PI) / 180;
+      if (nowNorth !== facingNorth || !root.hasAttribute('aria-label')) {
+        facingNorth = nowNorth;
+        const label = facingNorth ? 'Face south' : 'Face north';
+        root.setAttribute('aria-label', label);
+        root.title = label;
+      }
       rose.style.transform = `rotate(${-bearing}rad)`;
       const up = sun.altitudeDeg > 0;
       sunMark.hidden = !up;
@@ -76,6 +93,18 @@ export function mountSunBadge(parent: HTMLElement): {
         if (x < panelRight && y < panelBottom) {
           if (panelRight - x < panelBottom - y) x = Math.min(width - pad, panelRight);
           else y = Math.min(height - pad, panelBottom);
+        }
+      }
+      // The compass sits in the top-right corner. Slide the badge below it rather than over it.
+      const compass = parent.querySelector('#compass');
+      if (compass !== null) {
+        const compassBox = compass.getBoundingClientRect();
+        const stageBox = parent.getBoundingClientRect();
+        const left = compassBox.left - stageBox.left - pad;
+        const bottom = compassBox.bottom - stageBox.top + pad;
+        if (x > left && y < bottom) {
+          if (x - left < bottom - y) x = Math.max(pad, left);
+          else y = Math.min(height - pad, bottom);
         }
       }
       badge.dataset.edge = edge ? 'true' : 'false';

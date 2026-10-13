@@ -101,3 +101,31 @@ export function solarNoonMinutesAtOffset(
   const local = new Date(times.solarNoon.getTime() + offsetMinutes * 60_000);
   return local.getUTCHours() * 60 + local.getUTCMinutes();
 }
+
+/** Sunrise and sunset as minutes since local midnight. Null where the sun stays up or down all day. */
+export interface Daylight {
+  sunrise: number | null;
+  sunset: number | null;
+}
+
+/** Sunrise and sunset for the civil date at this site, in its time zone. */
+export function daylightLocalMinutes(isoDate: string, latitude: number, longitude: number, timeZone: string): Daylight {
+  const { year, month, day } = parseISODate(isoDate);
+  const midday = zonedLocalToDate(year, month, day, 12, 0, timeZone);
+  const times = SunCalc.getTimes(midday, latitude, longitude, 0, timeZoneOffsetMinutes(midday, timeZone));
+  const local = (instant: Date | null) => (instant === null ? null : minutesInZone(instant, timeZone));
+  return { sunrise: local(times.sunrise), sunset: local(times.sunset) };
+}
+
+/** Sunrise and sunset in a fixed longitude offset, without daylight saving. */
+export function daylightMinutesAtOffset(isoDate: string, latitude: number, longitude: number, offsetMinutes: number): Daylight {
+  const { year, month, day } = parseISODate(isoDate);
+  const midday = dateAtFixedOffset(year, month, day, 12, 0, offsetMinutes);
+  const times = SunCalc.getTimes(midday, latitude, longitude, 0, offsetMinutes);
+  const local = (instant: Date | null) => {
+    if (instant === null) return null;
+    const shifted = new Date(instant.getTime() + offsetMinutes * 60_000);
+    return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+  };
+  return { sunrise: local(times.sunrise), sunset: local(times.sunset) };
+}

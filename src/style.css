@@ -28,6 +28,7 @@ body {
   z-index: 0;
 }
 
+
 #map.inset,
 #stage.inset {
   position: absolute;
@@ -57,6 +58,8 @@ body {
 #map.inset #recenter,
 #map.inset #map-compass,
 #map.inset #map-help,
+#map.inset .maplibregl-ctrl-bottom-left,
+#map.inset .maplibregl-ctrl-bottom-right,
 #stage.inset #compass {
   display: none;
 }
@@ -212,14 +215,58 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-#panel.collapsed #panel-body {
+/* Folded, the panel keeps the time controls and the place line. */
+#panel.collapsed #panel-body > :not(.when, .time-row, .meta) {
   display: none;
 }
 
 @media (max-width: 720px) {
   #panel {
+    top: 8px;
+    left: 8px;
     width: min(268px, calc(100% - 16px));
+    max-height: calc(100% - 16px);
     padding: 8px;
+  }
+
+  #panel.collapsed #panel-body {
+    gap: 6px;
+  }
+
+  #map.inset,
+  #stage.inset {
+    right: 8px;
+    bottom: 8px;
+    width: 128px;
+    height: 88px;
+    border-radius: 10px;
+  }
+
+  #recenter,
+  #map-compass {
+    right: 12px;
+    bottom: 108px;
+    width: 40px;
+    height: 40px;
+  }
+
+  #map-compass {
+    bottom: 156px;
+  }
+
+  #recenter svg,
+  #map-compass svg {
+    margin: 8px;
+  }
+
+  /* Open, the help sits bottom-left, clear of the panel and the mini view. */
+  #map-help:not(.closed) {
+    top: auto;
+    right: auto;
+    bottom: 8px;
+    left: 8px;
+    width: min(260px, calc(100% - 160px));
+    max-height: 45%;
   }
 
   .panel-head h1 {
@@ -337,13 +384,67 @@ body {
 }
 
 #panel .time-row input[type='range'] {
+  display: block;
+  width: 100%;
+}
+
+/* The slider, with sunrise and sunset marked on it and their times underneath. */
+.time-track {
+  /* The slider thumb's width: a mark at minute m sits where the thumb's centre would be. */
+  --thumb: 16px;
+  position: relative;
   flex: 1 1 0;
-  width: auto;
   min-width: 0;
+}
+
+.sun-flag {
+  position: absolute;
+  top: 0;
+  left: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
+  height: 100%;
+  pointer-events: none;
+}
+
+.sun-flag::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: -1px;
+  width: 2px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  background: #f0a000;
+}
+
+.sun-flag-time {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  transform: translateX(-50%);
+  color: #8a5a00;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.sun-flag[hidden] {
+  display: none;
 }
 
 .meta {
   overflow-wrap: anywhere;
+}
+
+.maps-link {
+  color: inherit;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.maps-link:hover {
+  color: #1a73e8;
 }
 
 #time-label {
@@ -355,6 +456,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Room for the sunrise and sunset times under the slider. */
+  margin-bottom: 6px;
 }
 
 .time-row input[type='range'] {
@@ -423,6 +526,47 @@ body {
 .bar #tools {
   width: auto;
   max-width: none;
+}
+
+/*
+ * A grid, so the Edit trees and Solar heatmap buttons share a line while what each opens sits
+ * full width underneath. Their sections drop out of the layout and their parts join this grid.
+ */
+#tools {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 8px 6px;
+}
+
+#tools > *,
+#tree-body,
+#tree-note,
+#heat-body {
+  grid-column: 1 / -1;
+}
+
+#tools > .tree-editor:not([hidden]),
+#tools > .heat-panel,
+.tree-head {
+  display: contents;
+}
+
+#panel #tree-edit,
+#panel #heat-toggle {
+  grid-column: auto;
+  order: 1;
+  justify-self: start;
+}
+
+#tree-note,
+#tree-body,
+#heat-body {
+  order: 2;
+}
+
+#tree-note:empty {
+  display: none;
 }
 
 .address {
@@ -596,8 +740,20 @@ label.file input {
   background: rgba(18, 24, 32, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.18);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
-  pointer-events: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
   z-index: 2;
+}
+
+#compass:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+#compass:focus-visible {
+  outline: 2px solid #1a73e8;
+  outline-offset: 2px;
 }
 
 .rose {
@@ -663,6 +819,140 @@ label.file input {
 
 #sun-badge[data-edge='true'] {
   outline: 2px solid #fff;
+}
+
+#cell-readout {
+  position: absolute;
+  /* In front of the controls panel when there is no room beside it. */
+  z-index: 5;
+  display: grid;
+  gap: 1px;
+  /* Above the square, with a small arrow pointing down at it. */
+  transform: translate(-50%, calc(-100% - 12px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(20, 30, 50, 0.25);
+  color: #1c2430;
+  font: 12px/1.35 system-ui, sans-serif;
+  /* One line per fact where it fits; wraps on a narrow screen. */
+  width: max-content;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  /* Selectable, so the figures can be copied. */
+  user-select: text;
+  cursor: text;
+}
+
+/* Room on the first line for the Copy button. */
+#cell-readout > span:first-of-type {
+  padding-right: 52px;
+}
+
+#cell-readout .readout-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 7px;
+  border: 1px solid #d6dbe3;
+  border-radius: 5px;
+  background: #fff;
+  color: #5b6573;
+  font: 11px/1.4 system-ui, sans-serif;
+  cursor: pointer;
+  user-select: none;
+}
+
+#cell-readout .readout-copy:hover {
+  border-color: #1a73e8;
+  color: #1a73e8;
+}
+
+#cell-readout::after {
+  content: '';
+  position: absolute;
+  left: calc(50% + var(--arrow-x, 0px));
+  bottom: -6px;
+  margin-left: -6px;
+  border: 6px solid transparent;
+  border-bottom: 0;
+  border-top-color: #fff;
+}
+
+/* Too near the top for the label to fit above the square: it hangs below instead. */
+#cell-readout[data-below='true'] {
+  transform: translate(-50%, 12px);
+}
+
+#cell-readout[data-below='true']::after {
+  top: -6px;
+  bottom: auto;
+  border-top: 0;
+  border-bottom: 6px solid #fff;
+}
+
+#cell-readout .readout-head {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #e3e7ee;
+  color: #5b6573;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#cell-readout .readout-note {
+  margin-top: 4px;
+  color: #6b7785;
+  font-size: 11px;
+}
+
+#cell-readout strong {
+  font-size: 18px;
+}
+
+#cell-readout[hidden],
+#stage.inset ~ #cell-readout {
+  display: none;
+}
+
+#context-menu {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid #d6dbe3;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 6px 20px rgba(20, 30, 50, 0.22);
+  font: 14px/1.3 system-ui, sans-serif;
+}
+
+#context-menu[hidden] {
+  display: none;
+}
+
+#context-menu button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: #1c2430;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#context-menu button:hover,
+#context-menu button:focus-visible {
+  background: #eef3fd;
+  outline: none;
+}
+
+#context-menu button.danger {
+  color: #b3261e;
 }
 
 #webgl-error {
@@ -751,13 +1041,112 @@ label.file input {
   display: none;
 }
 
+.heat-panel {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+#panel #heat-toggle {
+  justify-self: start;
+}
+
+#panel #heat-toggle[aria-pressed='true'] {
+  background: #1a73e8;
+  border-color: #1a73e8;
+  color: #fff;
+}
+
+#heat-body {
+  display: grid;
+  gap: 6px;
+}
+
+#heat-body .note {
+  margin: 0;
+}
+
+.heat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.heat-key {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+}
+
+#panel #heat-about {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #cfd6de;
+  border-radius: 50%;
+  background: #fff;
+  color: #5b6573;
+  font: italic 700 13px Georgia, 'Times New Roman', serif;
+}
+
+#panel #heat-about[aria-expanded='true'] {
+  border-color: #1a73e8;
+  color: #1a73e8;
+}
+
+.heat-bar {
+  display: block;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.heat-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #5b6573;
+}
+
+#heat-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+#heat-summary dt {
+  color: #5b6573;
+}
+
+#heat-summary .heat-wide {
+  grid-column: 1 / -1;
+}
+
+#heat-summary [hidden] {
+  display: none;
+}
+
+#heat-summary dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+#heat-body[hidden],
+#heat-summary[hidden],
+#heat-reference[hidden] {
+  display: none;
+}
+
 .places {
   position: relative;
 }
 
 .places-row {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 
 #panel .places-row button {
@@ -776,17 +1165,32 @@ label.file input {
   background: #fff;
 }
 
+/* Square icon buttons, so the row fits on one line in a phone-width panel. */
+#panel .places-row #save-place,
 #panel .places-row #show-places {
-  margin-left: auto;
+  flex: none;
+  width: 32px;
+  padding: 5px 0;
+}
+
+/* The longest label gives way first if the row is still too tight. */
+#panel .places-row #save-home {
+  /* Block, not flex: an ellipsis needs the text in a block box. */
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #go-home svg,
-#save-place svg {
+#save-place svg,
+#show-places svg {
   width: 15px;
   height: 15px;
 }
 
-#save-place svg {
+#save-place svg,
+#show-places svg {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;

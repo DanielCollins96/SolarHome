@@ -12,6 +12,7 @@ import { createModelLayer } from './modelLayer.ts';
 import type { PlanPoint } from '../house/centering.ts';
 import type { TreeSpec } from '../scene/treeMesh.ts';
 import type { SunDirection } from '../sun/sunPosition.ts';
+import type { Group } from 'three';
 
 // Vite serves the library from a prebundled file, so the worker is not beside that file.
 setWorkerUrl(maplibreWorkerUrl);
@@ -50,6 +51,10 @@ export interface MapController {
   setTrees(trees: readonly TreeSpec[], selectedId: string | null): void;
   /** Move one drawn tree while it is dragged, in the model's metres. */
   moveTree(id: string, at: PlanPoint): void;
+  /** The solar heatmap over the model's roofs, in its metres. Null takes it away. */
+  setHeat(overlay: Group | null): void;
+  /** The basemap buildings around the selection that are redrawn in 3D. */
+  neighbours(): readonly NeighbourBlock[];
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -80,6 +85,8 @@ export function mountMap(
      * in the model's metres.
      */
     onPlainClick?: (hit: { treeId: string | null; ground: PlanPoint | null }) => boolean;
+    /** A right-click that did not turn the map, with where it was on the page. */
+    onRightClick?: (hit: { treeId: string | null; ground: PlanPoint | null }, at: { x: number; y: number }) => void;
     /**
      * Dragging a drawn tree. `start` returns true to take the press instead of panning the map;
      * `move` gets where the cursor meets the ground, in the model's metres.
@@ -89,6 +96,8 @@ export function mountMap(
       move: (ground: PlanPoint) => void;
       end: (moved: boolean) => void;
     };
+    /** The basemap buildings redrawn around the selection changed. */
+    onNeighbours?: (blocks: readonly NeighbourBlock[]) => void;
   },
 ): MapController {
   const map = new MapLibreMap({
@@ -160,12 +169,17 @@ export function mountMap(
   });
   container.append(compass);
 
+  let neighbourBlocks: readonly NeighbourBlock[] = [];
   const basemap = hideBasemapUnderSelection(
     map,
     () => footprints,
     () => Math.max(0, ...footprintHeights),
     () => (modelShown && footprintSpanM(footprints) <= MAX_NEIGHBOUR_SPAN_M ? NEIGHBOUR_REACH_M : 0),
-    (blocks) => modelLayer.setNeighbours(blocks),
+    (blocks) => {
+      neighbourBlocks = blocks;
+      modelLayer.setNeighbours(blocks);
+      options.onNeighbours?.(blocks);
+    },
   );
   const modelLayer = createModelLayer('selection-model');
   let modelShown = false;
@@ -234,6 +248,21 @@ export function mountMap(
     publish(false);
   });
 
+  // A right-drag turns the map, so a right-click only counts when the mouse comes up where it went down.
+  let rightPress: { x: number; y: number } | null = null;
+  map.getCanvas().addEventListener('mousedown', (event) => {
+    if (event.button === 2) rightPress = { x: event.offsetX, y: event.offsetY };
+  }, true);
+  window.addEventListener('mouseup', (event) => {
+    const start = rightPress;
+    if (event.button !== 2 || start === null) return;
+    rightPress = null;
+    const rect = map.getCanvas().getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    if (Math.hypot(x - start.x, y - start.y) > 4 || tracing) return;
+    options.onRightClick?.(modelLayer.pick(x, y), { x: event.clientX, y: event.clientY });
+  });
   map.getCanvas().addEventListener('mousedown', (event) => {
     // Ctrl-drag turns the map, so leave it to MapLibre like a right-drag.
     if (event.button !== 0 || event.shiftKey || event.ctrlKey || tracing) return;
@@ -463,6 +492,12 @@ export function mountMap(
     moveTree(id, at) {
       modelLayer.moveTree(id, at);
     },
+    setHeat(overlay) {
+      modelLayer.setHeat(overlay);
+    },
+    neighbours() {
+      return neighbourBlocks;
+    },
     setOsmRing(ring) {
       osmRing = ring.map((point) => ({ ...point }));
       publish(false);
@@ -545,6 +580,9 @@ export interface NeighbourBlock {
   baseM: number;
 }
 
+/** A tile building at least this much inside the selection is the selected building drawn its own way. */
+const SAME_BUILDING_SHARE = 0.5;
+
 function hideBasemapUnderSelection(
   map: MapLibreMap,
   selected: () => readonly (readonly LngLat[])[],
@@ -576,12 +614,13 @@ function hideBasemapUnderSelection(
       }
     }
     // Nearby buildings are flattened too and redrawn in 3D, where they can take a shadow.
-    const blocks = neighbours(next);
-    for (const block of blocks) next.set(block.flattened.key, block.flattened.target);
-    const signature = blocks.map((block) => block.block.key).join('|');
+    const found = neighbours(next);
+    for (const entry of found) next.set(entry.flattened.key, entry.flattened.target);
+    const blocks = found.flatMap((entry) => (entry.block === null ? [] : [entry.block]));
+    const signature = blocks.map((block) => block.key).join('|');
     if (signature !== lastNeighbours) {
       lastNeighbours = signature;
-      onNeighbours(blocks.map((block) => block.block));
+      onNeighbours(blocks);
     }
     for (const [key, target] of hidden) {
       if (next.has(key)) continue;
@@ -606,6 +645,8 @@ function hideBasemapUnderSelection(
     const maxEast = Math.max(...local.map((point) => point.east)) + reach;
     const minNorth = Math.min(...local.map((point) => point.north)) - reach;
     const maxNorth = Math.max(...local.map((point) => point.north)) + reach;
+    /** Tile buildings that are really the selected one, hidden but not redrawn. */
+    const swallowed: { key: string; target: Flattened }[] = [];
     // A building near a tile's edge comes back once per tile, each copy clipped differently.
     // Two copies would draw the same roof twice and flicker, so the most complete one is kept.
     const found = new Map<string, { area: number; blocks: { block: NeighbourBlock; flattened: { key: string; target: Flattened } }[] }>();
@@ -628,6 +669,13 @@ function hideBasemapUnderSelection(
           const at = projectToLocal(center, first);
           if (at.east < minEast || at.east > maxEast || at.north < minNorth || at.north > maxNorth) continue;
           area += Math.abs(ringAreaM2(ring));
+          // The tiles can draw a selected building as a shape of their own that the outlines above
+          // did not catch. Mostly inside the selection, it is that building: hide it, never redraw it,
+          // or it pokes through the model's roof and shades its edges.
+          if (overlapShare(ring, rings) >= SAME_BUILDING_SHARE) {
+            swallowed.push({ key: flatKey, target: { source, id: feature.id, center } });
+            continue;
+          }
           blocks.push({ block: { key: `${flatKey}:${index}`, ring, heightM, baseM }, flattened: { key: flatKey, target: { source, id: feature.id, center } } });
         }
         const kept = found.get(flatKey);
@@ -637,10 +685,12 @@ function hideBasemapUnderSelection(
     // The tiles can also hold one building twice under different ids, such as an outline and its
     // part. Coplanar roofs speckle, so a block inside a larger one of about the same height goes.
     const all = [...found.values()].flatMap((entry) => entry.blocks).sort((a, b) => Math.abs(ringAreaM2(b.block.ring)) - Math.abs(ringAreaM2(a.block.ring)));
-    const kept: typeof all = [];
+    const kept: { block: NeighbourBlock | null; flattened: { key: string; target: Flattened } }[] = [];
+    for (const flattened of swallowed) kept.push({ block: null, flattened });
     for (const candidate of all) {
       const inside = kept.some(
         (other) =>
+          other.block !== null &&
           Math.abs(other.block.heightM - candidate.block.heightM) < 0.5 &&
           Math.abs(other.block.baseM - candidate.block.baseM) < 0.5 &&
           ringContains(other.block.ring, centroid(candidate.block.ring)),
@@ -760,7 +810,7 @@ function mountMapHelp(container: HTMLElement): {
       <summary>How to use the map</summary>
       <ul>
         <li>Click a gray building to add it. Click a red one to remove it.</li>
-        <li>In the 3D view, double-click a building to remove it. Hover one and press Delete to do the same.</li>
+        <li>In the 3D view, hover a building and press Delete to remove it.</li>
         <li>Hold <strong>Shift</strong> and drag. The first direction is one side, and the opposite corner stays on the cursor.</li>
         <li>Left-drag to move. Right-drag to turn. Scroll to zoom. The target button returns to the selected outlines.</li>
       </ul>
@@ -1152,6 +1202,34 @@ function centroid(ring: readonly LngLat[]): LngLat {
   const latitude = ring.reduce((sum, vertex) => sum + vertex.latitude, 0) / ring.length;
   const longitude = ring.reduce((sum, vertex) => sum + vertex.longitude, 0) / ring.length;
   return { latitude, longitude };
+}
+
+/**
+ * How much of a ring lies inside any of the other rings, 0 to 1, from an even grid of points
+ * across it. Two rings that only share a wall, like row houses, come out near 0.
+ */
+function overlapShare(ring: readonly LngLat[], others: readonly (readonly LngLat[])[]): number {
+  const origin = centroid(ring);
+  const local = ring.map((point) => projectToLocal(point, origin));
+  const otherLocal = others.map((other) => other.map((point) => projectToLocal(point, origin)));
+  const east = local.map((point) => point.east);
+  const north = local.map((point) => point.north);
+  const minEast = Math.min(...east);
+  const minNorth = Math.min(...north);
+  const spanEast = Math.max(...east) - minEast;
+  const spanNorth = Math.max(...north) - minNorth;
+  const steps = 10;
+  let inRing = 0;
+  let covered = 0;
+  for (let i = 0; i < steps; i += 1) {
+    for (let j = 0; j < steps; j += 1) {
+      const point = { east: minEast + ((i + 0.5) / steps) * spanEast, north: minNorth + ((j + 0.5) / steps) * spanNorth };
+      if (!pointInRing(point, local)) continue;
+      inRing += 1;
+      if (otherLocal.some((other) => pointInRing(point, other))) covered += 1;
+    }
+  }
+  return inRing === 0 ? 0 : covered / inRing;
 }
 
 function ringContains(ring: readonly LngLat[], point: LngLat): boolean {

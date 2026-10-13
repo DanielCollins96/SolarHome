@@ -1,5 +1,7 @@
 import type { TreeKind } from '../scene/treeMesh.ts';
 
+const HEIGHT_STEP_M = 0.5;
+
 export interface SelectedTree {
   kind: TreeKind;
   widthM: number;
@@ -17,13 +19,15 @@ export function mountTreeEditor(
     onKind: (kind: TreeKind) => void;
     /** A factor on the crown width, such as 1.15 for wider. */
     onWidth: (factor: number) => void;
-    /** A factor on the height, such as 1.15 for taller. */
-    onHeight: (factor: number) => void;
+    /** Metres to add to the height, negative for shorter. */
+    onHeight: (stepM: number) => void;
     onRemove: () => void;
     onReset: () => void;
   },
 ): {
   editing: () => boolean;
+  /** Turn editing on, as choosing a tree's menu item does. */
+  startEditing: () => void;
   /** Show the editor only where there are trees to edit. Hiding it also ends editing. */
   setAvailable: (available: boolean) => void;
   /** Null when no tree is selected. */
@@ -39,7 +43,7 @@ export function mountTreeEditor(
       <span id="tree-note" class="note"></span>
     </div>
     <div id="tree-body" hidden>
-      <p class="note">Click a tree to change it, drag it to move it, or click open ground to plant one.</p>
+      <p class="note">Click a tree to change it, drag it to move it, or click open ground to plant one. Right-click a tree to copy or remove it.</p>
       <div id="tree-selected" hidden>
         <label class="tree-row">
           <span>Type</span>
@@ -86,13 +90,15 @@ export function mountTreeEditor(
   kindSelect.addEventListener('change', () => options.onKind(kindSelect.value === 'evergreen' ? 'evergreen' : 'deciduous'));
   required<HTMLButtonElement>(block, '#tree-narrower').addEventListener('click', () => options.onWidth(1 / 1.15));
   required<HTMLButtonElement>(block, '#tree-wider').addEventListener('click', () => options.onWidth(1.15));
-  required<HTMLButtonElement>(block, '#tree-shorter').addEventListener('click', () => options.onHeight(1 / 1.15));
-  required<HTMLButtonElement>(block, '#tree-taller').addEventListener('click', () => options.onHeight(1.15));
+  // A fixed half metre a click. A share of the height jumped metres at a time on a tall spruce.
+  required<HTMLButtonElement>(block, '#tree-shorter').addEventListener('click', () => options.onHeight(-HEIGHT_STEP_M));
+  required<HTMLButtonElement>(block, '#tree-taller').addEventListener('click', () => options.onHeight(HEIGHT_STEP_M));
   required<HTMLButtonElement>(block, '#tree-remove').addEventListener('click', () => options.onRemove());
   required<HTMLButtonElement>(block, '#tree-reset').addEventListener('click', () => options.onReset());
 
   return {
     editing: () => editing,
+    startEditing: () => setEditing(true),
     setAvailable(available) {
       block.hidden = !available;
       if (!available) setEditing(false);

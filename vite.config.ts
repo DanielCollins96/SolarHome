@@ -17,6 +17,13 @@ const proxy: Record<string, ProxyOptions> = {
     rewrite: (path) => path.replace(/^\/api\/osm/, '/api/0.6'),
     headers: appHeaders,
   },
+  // Monthly sunlight records. PVGIS does not answer calls made from a web page.
+  '/api/pvgis': {
+    target: 'https://re.jrc.ec.europa.eu',
+    changeOrigin: true,
+    rewrite: (path) => path.replace(/^\/api\/pvgis\/MRcalc/, '/api/v5_2/MRcalc'),
+    headers: appHeaders,
+  },
   '/api/overpass': {
     target: 'https://overpass-api.de',
     changeOrigin: true,

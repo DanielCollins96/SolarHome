@@ -91,7 +91,8 @@ export function createSunMarker(): Group {
   );
   const disc = new Mesh(
     new SphereGeometry(1, 24, 16),
-    new MeshBasicMaterial({ color: 0xffd23a, toneMapped: false }),
+    // Transparent so it can fade when it sits over the house.
+    new MeshBasicMaterial({ color: 0xffd23a, toneMapped: false, transparent: true, depthWrite: false }),
   );
   marker.add(glow);
   marker.add(disc);
@@ -170,6 +171,21 @@ export function frameHouse(camera: PerspectiveCamera, controls: OrbitControls, b
 }
 
 /** Park the disc along the sun vector, sized so it stays obvious as you zoom. */
+/** How far past the camera the sun sits, as a multiple of the camera's distance from the house. */
+const SUN_MARKER_REACH = 4;
+/** Disc radius as a share of its distance: about 2°, so it looks the same size from anywhere. */
+const SUN_MARKER_SIZE = 0.035;
+/** Inside this angle from the middle of the view the sun is over the house, so it fades to let it show. */
+const SUN_FADE_INNER_DEG = 8;
+const SUN_FADE_OUTER_DEG = 22;
+const SUN_FADED_OPACITY = 0.2;
+const markerOffset = new Vector3();
+const viewForward = new Vector3();
+
+/**
+ * Put the sun far out beyond the house, like the real one. Looking from the sun's side then puts
+ * it behind the camera rather than in front of the lens, and it keeps one size on screen.
+ */
 export function placeSunMarker(
   marker: Object3D,
   towardSun: SunVector,
@@ -179,13 +195,22 @@ export function placeSunMarker(
 ): void {
   marker.visible = altitudeDeg > 0;
   if (!marker.visible) return;
-  const distance = Math.max(16, camera.position.distanceTo(target) * 0.78);
+  const distance = Math.min(Math.max(16, camera.position.distanceTo(target) * SUN_MARKER_REACH), camera.far * 0.9);
   marker.position.set(
     target.x + towardSun.x * distance,
     target.y + towardSun.y * distance,
     target.z + towardSun.z * distance,
   );
-  marker.scale.setScalar(distance * 0.12);
+  marker.scale.setScalar(distance * SUN_MARKER_SIZE);
+  // Fade when the sun is near the middle of the view, where it would cover the house.
+  camera.getWorldDirection(viewForward);
+  markerOffset.copy(marker.position).sub(camera.position).normalize();
+  const offCentreDeg = (Math.acos(Math.min(1, Math.max(-1, viewForward.dot(markerOffset)))) * 180) / Math.PI;
+  const t = Math.min(1, Math.max(0, (offCentreDeg - SUN_FADE_INNER_DEG) / (SUN_FADE_OUTER_DEG - SUN_FADE_INNER_DEG)));
+  const fade = SUN_FADED_OPACITY + (1 - SUN_FADED_OPACITY) * t;
+  const [glow, disc] = marker.children;
+  if (glow instanceof Mesh && glow.material instanceof MeshBasicMaterial) glow.material.opacity = 0.45 * fade;
+  if (disc instanceof Mesh && disc.material instanceof MeshBasicMaterial) disc.material.opacity = fade;
 }
 
 const sunArrowAxis = new Vector3(1, 0, 0);
