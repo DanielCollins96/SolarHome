@@ -1279,3 +1279,55 @@ label.file input {
   font-size: 16px;
   line-height: 1;
 }
+
+/* Compare mode: the saved places to stand side by side. The search, places and trees step aside. */
+#panel #tools.comparing > :not(.compare, .heat-panel) {
+  display: none;
+}
+
+.compare[hidden] {
+  display: none;
+}
+
+.compare-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+}
+
+#compare-list {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 4px;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid #d7dde3;
+  border-radius: 8px;
+}
+
+#panel #compare-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  cursor: pointer;
+}
+
+#compare-list span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#compare-list input {
+  flex: none;
+  margin: 0;
+}
+
+#panel #places-list .places-compare button {
+  width: 100%;
+  margin-top: 4px;
+}

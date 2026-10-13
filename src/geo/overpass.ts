@@ -113,8 +113,19 @@ async function loadOsmBuildingAt(
   const inside = (footprint: GeographicBuilding, list: readonly LngLat[]) =>
     list.filter((point) => buildingContains(footprint, point.latitude, point.longitude)).length;
   // Relations in a map box are listed without the members outside it, so each is loaded whole.
+  // A city block can hold more of them than are worth loading, like the Eixample's around the
+  // Sagrada Família, so those whose pieces in the box reach round a clicked point go first.
+  const reachesRound = (relation: OverpassElement) => {
+    const corners = (relation.members ?? []).flatMap((member) => member.geometry ?? []);
+    if (corners.length === 0) return false;
+    const lats = corners.map((corner) => corner.lat);
+    const lons = corners.map((corner) => corner.lon);
+    const [south, north, west, east] = [Math.min(...lats), Math.max(...lats), Math.min(...lons), Math.max(...lons)];
+    return points.some((point) => point.latitude >= south && point.latitude <= north && point.longitude >= west && point.longitude <= east);
+  };
   const relations = area
     .filter((element) => element.type === 'relation' && (element.tags?.type === 'building' || element.tags?.building !== undefined))
+    .sort((a, b) => Number(reachesRound(b)) - Number(reachesRound(a)))
     .slice(0, 4);
   const candidates: { building: GeographicBuilding; hits: number; nearHits: number; area: number; relation: boolean }[] = [];
   const consider = (building: GeographicBuilding, footprint: GeographicBuilding, relation: boolean) => {
@@ -144,7 +155,9 @@ async function loadOsmBuildingAt(
   );
   const chosen = candidates[0];
   if (chosen === undefined) return null;
-  return chosen.relation ? chosen.building : withLooseParts(chosen.building, deps);
+  // A building relation lists its own parts. A multipolygon outline, like the Sagrada Família's,
+  // is only the outline, with its towers drawn as loose parts inside it.
+  return chosen.building.tags.type === 'building' ? chosen.building : withLooseParts(chosen.building, deps);
 }
 
 /** An outline wider than this is not searched for loose parts: the map read would be too large. */
@@ -157,14 +170,15 @@ const MAX_LOOSE_PARTS_SPAN_M = 600;
  * the building and the outline is left out.
  */
 async function withLooseParts(building: GeographicBuilding, deps: OverpassDeps): Promise<GeographicBuilding> {
-  const outline = building.parts[0]?.outer;
-  if (building.parts.length !== 1 || outline === undefined || outline.length < 3) return building;
+  // A multipolygon outline can have several rings, like a church and its separate sacristy.
+  const outlines = building.parts.map((part) => part.outer);
+  if (outlines.length === 0 || outlines.some((outline) => outline.length < 3)) return building;
   if (isPart(building.tags['building:part'])) return building;
   let south = Infinity;
   let west = Infinity;
   let north = -Infinity;
   let east = -Infinity;
-  for (const point of outline) {
+  for (const point of outlines.flat()) {
     south = Math.min(south, point.latitude);
     north = Math.max(north, point.latitude);
     west = Math.min(west, point.longitude);
@@ -186,7 +200,7 @@ async function withLooseParts(building: GeographicBuilding, deps: OverpassDeps):
     if (!isPart(element.tags?.['building:part'])) continue;
     for (const piece of toBuildings(element, 'Part')) {
       for (const ring of piece.parts) {
-        if (insideOutline(ring.outer, outline)) parts.push({ ...ring, tags: piece.tags });
+        if (outlines.some((outline) => insideOutline(ring.outer, outline))) parts.push({ ...ring, tags: piece.tags });
       }
     }
   }
@@ -196,8 +210,7 @@ async function withLooseParts(building: GeographicBuilding, deps: OverpassDeps):
   const outlineTop = tagHeight(building.tags);
   const partsTop = Math.max(0, ...parts.map((part) => tagHeight(part.tags ?? {}) ?? 0));
   if (outlineTop !== undefined && partsTop < outlineTop * 0.8) {
-    const own = building.parts[0];
-    if (own !== undefined) return { ...building, parts: [{ ...own, tags: building.tags }, ...parts] };
+    return { ...building, parts: [...building.parts.map((own) => ({ ...own, tags: building.tags })), ...parts] };
   }
   return { ...building, parts };
 }
@@ -352,6 +365,18 @@ function relationBuilding(
 function outlineName(relation: OverpassElement, ways: Map<number, OverpassElement>): string | undefined {
   const outline = relation.members?.find((member) => member.role === 'outline' && member.ref !== undefined);
   return outline?.ref === undefined ? undefined : ways.get(outline.ref)?.tags?.name;
+}
+
+/**
+ * A multipolygon outline without the parts drawn inside it, as lookups made before those parts
+ * were gathered kept the Sagrada Família: a flat slab under where its towers should be.
+ */
+export function mayLackParts(building: GeographicBuilding): boolean {
+  return (
+    building.id.startsWith('relation/') &&
+    building.tags.type !== 'building' &&
+    !building.parts.some((part) => isPart(part.tags?.['building:part']))
+  );
 }
 
 function isPart(value: string | undefined): boolean {

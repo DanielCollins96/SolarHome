@@ -7,13 +7,15 @@ import { type HouseModel } from './house/houseModel.ts';
 import { createLookupCache, openIndexedDbStore, type KeyValueStore } from './geo/cache.ts';
 import { GeoFailure, reverseGeocode, searchAddresses } from './geo/geocode.ts';
 import { inCalgary, lacksHeight, loadCalgaryCanopy, loadCalgaryTrees, type ListedTree, withCalgaryHeights } from './geo/calgary.ts';
-import { buildingContains, loadBuilding, loadBuildingsInBounds, loadWholeBuilding } from './geo/overpass.ts';
+import { buildingContains, loadBuilding, loadBuildingsInBounds, loadWholeBuilding, mayLackParts } from './geo/overpass.ts';
 import { localToLngLat, projectRing, projectToLocal, unprojectRing, type LngLat } from './geo/projection.ts';
 import { DEMO_LOCATION } from './scene/demoLocation.ts';
 import { createGround, createGroundGrid } from './scene/groundPlane.ts';
 import { createNeighbourGroup } from './scene/neighbourMesh.ts';
 import { createNorthArrow } from './scene/northArrow.ts';
 import { createSavedPlaces, samePlace, type SavedPlace } from './scene/savedPlaces.ts';
+import { compareModel, comparePlaceId, lineUp, planBounds } from './scene/compareLayout.ts';
+import { createLabelSprite } from './scene/labelSprite.ts';
 import { createTreeEdits, MAX_TREE_HEIGHT_M, MAX_TREE_WIDTH_M, MIN_TREE_HEIGHT_M, MIN_TREE_WIDTH_M, type PlacedTree } from './scene/treeEdits.ts';
 import { createTreeGroup, moveTreeMesh, planTrees, treeHeightOf, type TreeCrown, type TreeKind, type TreePoint, type TreeSpec } from './scene/treeMesh.ts';
 import type { PlanPoint } from './house/centering.ts';
@@ -48,6 +50,7 @@ import {
 import { dateAtFixedOffset, longitudeOffsetMinutes, parseISODate, timeZoneAt, zonedLocalToDate } from './sun/zonedTime.ts';
 import { mountAddressSearch } from './ui/addressSearch.ts';
 import { mountPlacesPanel } from './ui/placesPanel.ts';
+import { mountComparePanel } from './ui/comparePanel.ts';
 import { mountTreeEditor } from './ui/treeEditor.ts';
 import { mountHeatPanel } from './ui/heatPanel.ts';
 import { idealNormal, openPlaneYield, skySamples, type SkySamples } from './solar/exposure.ts';
@@ -123,6 +126,8 @@ const MAX_TREE_AREA_M = 600;
 const NEW_TREE_WIDTH_M = 5;
 /** Buildings already looked up in the City of Calgary's heights, by id, with any height it added. */
 const cityChecked = new Map<string, GeographicBuilding>();
+/** Old outlines that were looked up again for the parts drawn inside them, by id. */
+const partsChecked = new Set<string>();
 let openingDone: Promise<void> = Promise.resolve();
 /** Set once the person selects anything, so the slow opening lookup does not replace their choice. */
 let userSelected = false;
@@ -283,8 +288,29 @@ try {
       places.forget(place.id);
       refreshPlaces();
     },
+    onCompare: () => enterCompare(),
   });
   refreshPlaces();
+
+  const comparePanel = mountComparePanel(panel.tools, {
+    onChoose: (place, chosen) => {
+      void choosePlace(place, chosen);
+    },
+    onDone: () => leaveCompare(true),
+  });
+  /** Saved places standing side by side in 3D, or null outside compare mode. */
+  let comparing: {
+    chosen: string[];
+    models: Map<string, HouseModel>;
+    /** How far each place has been dragged from its spot in the row. */
+    moved: Map<string, PlanPoint>;
+    /** What was on show before, to go back to: null when nothing was. */
+    before: { model: HouseModel; site: Site } | null;
+  } | null = null;
+  const compareLabels = new Group();
+  scene.add(compareLabels);
+  /** A compared place being dragged: its mesh, its label, and how far it has gone. */
+  let compareDrag: { placeId: string; piece: Group; label: Object3D | null; labelAt: Vector3; from: PlanPoint; by: PlanPoint } | null = null;
 
   const treeEditor = mountTreeEditor(panel.tools, {
     onToggle: (editing) => {
@@ -362,7 +388,7 @@ try {
     scene.add(house);
   }
 
-  function showHouse(next: HouseModel, options: { syncMap: boolean; fly: boolean; demo: boolean; announce?: boolean }): void {
+  function showHouse(next: HouseModel, options: { syncMap: boolean; fly: boolean; demo: boolean; announce?: boolean; frame?: boolean }): void {
     const built = createHouseObject(next);
     replaceHouse(built.group);
     orbitTarget.copy(houseOrbitTarget(house));
@@ -370,7 +396,7 @@ try {
     const size = box.getSize(new Vector3());
     const radius = Math.max(size.x, size.y, size.z, 8) / 2;
     viewRadius = radius;
-    frameHouse(camera, controls, box);
+    if (options.frame !== false) frameHouse(camera, controls, box);
     fitSunShadow(sunLight, Math.max(size.x, size.z, 8) / 2, size.y);
     shadowRadius = radius;
     const groundSize = Math.max(48, radius * 8);
@@ -533,7 +559,7 @@ try {
 
   /** Drop a selection once the map has left it, so a distant outline does not keep the sun and the 3D view busy. */
   function releaseDistantSelection(center: { latitude: number; longitude: number }): void {
-    if (picked.length === 0) return;
+    if (picked.length === 0 || comparing !== null) return;
     const offset = projectToLocal(center, model.origin);
     if (Math.hypot(offset.east, offset.north) < DISTANT_SELECTION_M) return;
     picked = [];
@@ -552,6 +578,7 @@ try {
 
   function showPicked(note: string, fly = false): void {
     userSelected = true;
+    leaveCompare(false);
     // The dashed outline belongs to an address search, not to whatever is selected now.
     map.setOsmRing([]);
     if (picked.length === 0) {
@@ -611,8 +638,13 @@ try {
   async function showTrees(next: HouseModel): Promise<void> {
     const token = ++treeToken;
     cityTrees = [];
-    treeOrigin = next.origin;
+    // Compared places come from different cities, and no one city's trees stand among them.
+    treeOrigin = comparing === null ? next.origin : null;
     selectTree(null);
+    if (comparing !== null) {
+      drawTrees();
+      return;
+    }
     const points = next.parts.flatMap((part) => part.footprint);
     if (!inCalgary(next.origin) || points.length === 0) return;
     const east = points.map((point) => point.east);
@@ -720,7 +752,8 @@ try {
     const origin = current.origin;
     const nearTrees: TreeSpec[] =
       treeOrigin === origin ? currentTrees().map((tree) => ({ ...tree, at: projectToLocal(tree.at, origin) })) : [];
-    const blocks = map.neighbours().map((block) => ({ ring: projectRing(block.ring, origin), heightM: block.heightM, baseM: block.baseM }));
+    // The map's blocks surround the selection, not compared places standing on open ground.
+    const blocks = (comparing !== null ? [] : map.neighbours()).map((block) => ({ ring: projectRing(block.ring, origin), heightM: block.heightM, baseM: block.baseM }));
     const occluders = collectOccluders(current, nearTrees, blocks);
     const { points, normals } = cellSamples(grid);
     heatPanel.setProgress(0);
@@ -735,7 +768,7 @@ try {
     }
     if (result === null || token !== heatToken || model !== current) return;
     const shares = result.kwhPerM2.map((kwh) => kwh / idealKwhPerM2);
-    showHeat(createHeatOverlay(grid, shares), createHeatOverlay(grid, shares));
+    showHeat(createHeatOverlay(grid, shares), comparing === null ? createHeatOverlay(grid, shares) : null);
     // What clouds take from each face: its open-sky year with the weather record against without.
     const faceCloudLoss =
       weather === null ? null : grid.faces.map((face) => Math.max(0, 1 - openPlaneYield(face.normal, sky) / Math.max(openPlaneYield(face.normal, clear), 1e-6)));
@@ -1047,6 +1080,13 @@ try {
       for (const building of place.buildings) rememberBuilding(building);
       picked = place.buildings.slice();
       showPicked(`Back at ${place.label}.`, true);
+      const shown = picked;
+      void withParts(place).then((fresh) => {
+        if (fresh === null || picked !== shown) return;
+        for (const building of fresh) rememberBuilding(building);
+        picked = fresh.slice();
+        showPicked(`Back at ${place.label}.`);
+      });
       return;
     }
     picked = [];
@@ -1054,6 +1094,168 @@ try {
     map.setFootprints([]);
     map.flyTo(place.at.longitude, place.at.latitude);
     void runPick(place.at);
+  }
+
+  /**
+   * A saved place's buildings, looked up again where they were kept as an outline without the
+   * parts drawn inside it, and saved again. Null when nothing needed it.
+   */
+  async function withParts(place: SavedPlace): Promise<GeographicBuilding[] | null> {
+    const stored = place.buildings ?? [];
+    const stale = stored.filter((building) => mayLackParts(building) && !partsChecked.has(building.id));
+    if (stale.length === 0) return null;
+    let changed = false;
+    const fresh = await Promise.all(
+      stored.map(async (building) => {
+        if (!stale.includes(building)) return building;
+        partsChecked.add(building.id);
+        const corners = building.parts.flatMap((part) => part.outer);
+        const center = ringCentroid(building.parts[0]?.outer ?? []);
+        try {
+          const whole = await loadWholeBuilding(center.latitude, center.longitude, { fetch, cache }, footprintReach(building) + 5, corners.slice(0, 200));
+          if (whole.id !== building.id) return building;
+          changed = true;
+          return whole;
+        } catch {
+          return building;
+        }
+      }),
+    );
+    if (!changed) return null;
+    places.updateBuildings(place.id, fresh);
+    return fresh;
+  }
+
+  /** Stand saved places side by side in 3D, starting with the place on show, if saved, and the next one. */
+  function enterCompare(): void {
+    const saved = places.saved();
+    if (saved.length === 0) return;
+    if (comparing === null) {
+      comparing = {
+        chosen: [],
+        models: new Map(),
+        moved: new Map(),
+        before: house.children.length === 0 ? null : { model, site },
+      };
+    }
+    panel.tools.classList.add('comparing');
+    showView('plane');
+    const here = savedHere();
+    const start = here === undefined ? saved.slice(0, 2) : [here, ...saved.filter((place) => place !== here).slice(0, 1)];
+    for (const place of start) void choosePlace(place, true);
+    showCompare(true);
+  }
+
+  async function choosePlace(place: SavedPlace, chosen: boolean): Promise<void> {
+    const state = comparing;
+    if (state === null) return;
+    state.chosen = state.chosen.filter((id) => id !== place.id);
+    if (!chosen) {
+      state.moved.delete(place.id);
+      showCompare();
+      return;
+    }
+    state.chosen.push(place.id);
+    if (state.models.has(place.id)) {
+      showCompare(true);
+      return;
+    }
+    comparePanel.show(places.saved(), new Set(state.chosen));
+    comparePanel.setMessage(`Loading ${place.label}…`);
+    try {
+      // A place too large to keep its buildings is looked up again where it was saved.
+      const buildings =
+        place.buildings !== undefined && place.buildings.length > 0
+          ? ((await withParts(place)) ?? place.buildings)
+          : [await loadWholeBuilding(place.at.latitude, place.at.longitude, { fetch, cache })];
+      state.models.set(place.id, assembleBuildings(buildings));
+    } catch (error) {
+      if (comparing !== state) return;
+      state.chosen = state.chosen.filter((id) => id !== place.id);
+      showCompare();
+      comparePanel.setMessage(`${place.label} could not be loaded. ${failureText(error)}`);
+      return;
+    }
+    if (comparing === state && state.chosen.includes(place.id)) showCompare(true);
+  }
+
+  /** Draw the chosen places in a row, each moved by however far it was dragged. `frame` fits the view to them. */
+  function showCompare(frame = false): void {
+    const state = comparing;
+    if (state === null) return;
+    comparePanel.show(places.saved(), new Set(state.chosen));
+    clearCompareLabels();
+    const names = new Map(places.saved().map((place) => [place.id, place.label]));
+    const ready = state.chosen.flatMap((id) => {
+      const loaded = state.models.get(id);
+      return loaded === undefined ? [] : [{ id, model: loaded }];
+    });
+    if (ready.length === 0) {
+      replaceHouse(new Group());
+      scheduleHeat(true);
+      comparePanel.setMessage(state.chosen.length > 0 ? 'Loading…' : 'Tick saved places to stand them side by side.');
+      return;
+    }
+    const row = lineUp(ready.map((entry) => entry.model));
+    const entries = ready.map((entry, index) => {
+      const base = row[index] ?? { east: 0, north: 0 };
+      const moved = state.moved.get(entry.id) ?? { east: 0, north: 0 };
+      return { placeId: entry.id, model: entry.model, offset: { east: base.east + moved.east, north: base.north + moved.north } };
+    });
+    const first = names.get(entries[0]?.placeId ?? '') ?? 'the first place';
+    model = compareModel(entries, entries.length === 1 ? first : `${entries.length} places`);
+    site = { ...siteAt(model.origin), label: first };
+    describeSite(`Comparing ${entries.length === 1 ? first : `${entries.length} places`} under the sun at ${first}.`);
+    showHouse(model, { syncMap: false, fly: false, demo: false, announce: false, frame });
+    for (const entry of entries) {
+      const box = planBounds(entry.model);
+      const top = Math.max(0, ...entry.model.parts.map(partTopHeight));
+      const label = createLabelSprite(names.get(entry.placeId) ?? 'Saved place');
+      label.position.set(entry.offset.east + (box.west + box.east) / 2, top + 2, -(entry.offset.north + (box.south + box.north) / 2));
+      label.userData.placeId = entry.placeId;
+      compareLabels.add(label);
+    }
+    const loading = state.chosen.length > ready.length;
+    comparePanel.setMessage(
+      loading ? 'Loading…' : ready.length < 2 ? 'Tick another saved place to stand beside it.' : 'Drag a building to move it. The sun is the first place’s.',
+    );
+    panel.setStatus(`Comparing ${entries.map((entry) => names.get(entry.placeId) ?? 'a place').join(', ')}.`);
+  }
+
+  function clearCompareLabels(): void {
+    for (const label of compareLabels.children) {
+      if (label instanceof Sprite) label.material.map?.dispose();
+    }
+    disposeObject(compareLabels);
+    compareLabels.clear();
+  }
+
+  /** End compare mode. `restore` brings back what was on show before it. */
+  function leaveCompare(restore: boolean): void {
+    const state = comparing;
+    if (state === null) return;
+    comparing = null;
+    compareDrag = null;
+    controls.enabled = true;
+    panel.tools.classList.remove('comparing');
+    clearCompareLabels();
+    comparePanel.show(null, new Set());
+    if (!restore) return;
+    if (picked.length > 0) {
+      showPicked('Back from comparing.');
+      return;
+    }
+    if (state.before === null) {
+      replaceHouse(new Group());
+      drawTrees();
+      scheduleHeat(true);
+      updateSun();
+      return;
+    }
+    model = state.before.model;
+    site = state.before.site;
+    describeSite(site.label);
+    showHouse(model, { syncMap: false, fly: false, demo: false, announce: false });
   }
 
   const resize = () => {
@@ -1068,6 +1270,8 @@ try {
 
   showView = (view) => {
     const mapMain = view === 'map';
+    // Compared places stand nowhere on the map.
+    if (mapMain) leaveCompare(true);
     if (mapMain) unpickCell();
     panel.setView(view);
     mapHost.classList.toggle('primary', mapMain);
@@ -1122,6 +1326,13 @@ try {
   const removeHighlighted = (group: Group | null) => {
     const id: unknown = group?.userData.buildingId;
     if (typeof id !== 'string' || id === '') return;
+    const placeId = comparePlaceId(id);
+    if (placeId !== null) {
+      const place = places.saved().find((item) => item.id === placeId);
+      highlightBuilding(null);
+      if (place !== undefined) void choosePlace(place, false);
+      return;
+    }
     const index = picked.findIndex((building) => building.id === id);
     if (index < 0) return;
     highlightBuilding(null);
@@ -1175,6 +1386,40 @@ try {
     if (draggedTree === null) return;
     controls.enabled = true;
     endTreeDrag(pressMoved(event));
+  });
+  // In compare mode a press on a place drags it along the ground; its shadow follows once it lands.
+  canvas.addEventListener('pointerdown', (event) => {
+    if (comparing === null || stage.classList.contains('inset') || event.button !== 0) return;
+    const piece = buildingGroupAt(event);
+    const id: unknown = piece?.userData.buildingId;
+    const placeId = typeof id === 'string' ? comparePlaceId(id) : null;
+    const from = treeHitAt(event).ground;
+    if (piece === null || placeId === null || from === null) return;
+    const label = compareLabels.children.find((child) => child.userData.placeId === placeId) ?? null;
+    compareDrag = { placeId, piece, label, labelAt: label?.position.clone() ?? new Vector3(), from, by: { east: 0, north: 0 } };
+    controls.enabled = false;
+    canvas.setPointerCapture(event.pointerId);
+    canvas.style.cursor = 'grabbing';
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (compareDrag === null) return;
+    const ground = treeHitAt(event).ground;
+    if (ground === null) return;
+    const by = { east: ground.east - compareDrag.from.east, north: ground.north - compareDrag.from.north };
+    compareDrag.by = by;
+    compareDrag.piece.position.set(by.east, 0, -by.north);
+    compareDrag.label?.position.set(compareDrag.labelAt.x + by.east, compareDrag.labelAt.y, compareDrag.labelAt.z - by.north);
+  });
+  canvas.addEventListener('pointerup', () => {
+    const drag = compareDrag;
+    if (drag === null) return;
+    compareDrag = null;
+    controls.enabled = true;
+    canvas.style.cursor = '';
+    if (comparing === null || Math.hypot(drag.by.east, drag.by.north) < 0.5) return;
+    const moved = comparing.moved.get(drag.placeId) ?? { east: 0, north: 0 };
+    comparing.moved.set(drag.placeId, { east: moved.east + drag.by.east, north: moved.north + drag.by.north });
+    showCompare();
   });
   canvas.addEventListener('click', (event) => {
     if (stage.classList.contains('inset') || !treeEditor.editing() || pressedAt === null || pressMoved(event)) return;
@@ -1381,6 +1626,8 @@ function tileTags(footprint: PickedFootprint): Record<string, string> {
 }
 
 function rememberBuilding(building: GeographicBuilding): void {
+  // An old outline missing its parts is not reused, so a click on it looks it up afresh.
+  if (mayLackParts(building) && !partsChecked.has(building.id)) return;
   if (knownBuildings.some((item) => item.id === building.id)) return;
   knownBuildings.push(building);
 }

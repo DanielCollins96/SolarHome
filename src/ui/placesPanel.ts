@@ -21,6 +21,8 @@ export function mountPlacesPanel(
     onToggleSaved: () => void;
     onUnsave: (place: SavedPlace) => void;
     onForget: (place: SavedPlace) => void;
+    /** Stand saved places side by side in 3D. */
+    onCompare: () => void;
   },
 ): {
   setPlaces: (home: SavedPlace | null, saved: readonly SavedPlace[], recent: readonly SavedPlace[]) => void;
@@ -81,6 +83,16 @@ export function mountPlacesPanel(
     item.append(go, forget);
     return item;
   };
+  const compareRow = () => {
+    const item = document.createElement('li');
+    item.className = 'places-compare';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.compare = '';
+    button.textContent = 'Compare in 3D';
+    item.append(button);
+    return item;
+  };
   const render = () => {
     goHome.disabled = home === null;
     goHome.title = home === null ? 'Save a selection as home first' : `Go to ${home.label}`;
@@ -95,7 +107,7 @@ export function mountPlacesPanel(
     showPlaces.disabled = empty;
     if (empty) setOpen(false);
     list.replaceChildren(
-      ...(saved.length > 0 ? [heading('Saved'), ...saved.map((place) => row(place, 'saved'))] : []),
+      ...(saved.length > 0 ? [heading('Saved'), ...saved.map((place) => row(place, 'saved')), compareRow()] : []),
       ...(recent.length > 0 ? [heading('Recent'), ...recent.map((place) => row(place, 'recent'))] : []),
     );
   };
@@ -118,6 +130,11 @@ export function mountPlacesPanel(
   list.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('button') : null;
     if (target === null) return;
+    if (target.dataset.compare !== undefined) {
+      setOpen(false);
+      options.onCompare();
+      return;
+    }
     const from = target.dataset.kind === 'saved' ? saved : recent;
     const forgetId = target.dataset.forget;
     if (forgetId !== undefined) {

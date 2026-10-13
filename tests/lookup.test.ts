@@ -279,6 +279,37 @@ describe('building lookup', () => {
     expect(building.parts.map((part) => part.tags?.height)).toEqual(['64', '330']);
   });
 
+  it('gathers loose parts inside a multipolygon outline, as the Sagrada Família is mapped', async () => {
+    const nave = ring(41.4036, 2.1744, 0.0006, 0.0008);
+    const outline = { type: 'way', id: 1, geometry: nave };
+    const church = {
+      type: 'relation',
+      id: 9194723,
+      tags: { type: 'multipolygon', building: 'church', name: 'Basílica de la Sagrada Família' },
+      members: [{ type: 'way', ref: 1, role: 'outer', geometry: nave }],
+    };
+    const jesus = { type: 'way', id: 2, tags: { 'building:part': 'tower', height: '170' }, geometry: ring(41.4036, 2.1744, 0.0001, 0.0001) };
+    const apse = { type: 'way', id: 3, tags: { 'building:part': 'yes', height: '60' }, geometry: ring(41.4039, 2.1747, 0.0001, 0.0002) };
+    const fetchImpl: typeof fetch = async (input) => {
+      const path = String(input);
+      // Four apartment blocks, listed first, are more relations than a click loads.
+      const blocks = [1, 2, 3, 4].map((index) => ({
+        type: 'relation',
+        id: 10615310 + index,
+        tags: { type: 'multipolygon', building: 'apartments' },
+        members: [{ type: 'way', ref: 100 + index, role: 'outer', geometry: ring(41.4045, 2.1730 + index * 0.0003, 0.0002, 0.0002) }],
+      }));
+      const relationId = /relation\/(\d+)\//.exec(path)?.[1];
+      const elements = path.includes('/map.json')
+        ? [...blocks, church, outline, jesus, apse]
+        : [...[...blocks, church].filter((item) => String(item.id) === relationId), ...(relationId === '9194723' ? [outline] : [])];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    };
+    const building = await loadWholeBuilding(41.40362, 2.17441, { fetch: fetchImpl, cache: createLookupCache() });
+    expect(building.label).toBe('Basílica de la Sagrada Família');
+    expect(building.parts.map((part) => part.tags?.height)).toEqual(['170', '60']);
+  });
+
   it('keeps the outline when its loose parts stop far short of it, as the Calgary Tower is mapped', async () => {
     const outline = { type: 'way', id: 25719793, tags: { building: 'yes', height: '191', name: 'Calgary Tower' }, geometry: ring(51.0441, -114.0634, 0.0003, 0.0005) };
     const base = { type: 'way', id: 1, tags: { 'building:part': 'yes', 'building:levels': '3' }, geometry: ring(51.04425, -114.0632, 0.0001, 0.0001) };

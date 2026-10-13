@@ -95,6 +95,17 @@ export function createSavedPlaces(storage: Pick<Storage, 'getItem' | 'setItem'> 
       for (const item of matches) if (item !== null) item.label = label;
       if (matches.length > 0) save();
     },
+    /** Replace a place's buildings with a fresher lookup of them, wherever it is kept. */
+    updateBuildings(id: string, buildings: GeographicBuilding[]): void {
+      const matches = [places.home, ...places.saved, ...places.recent].filter((item) => item?.id === id);
+      const fits = JSON.stringify(buildings).length <= MAX_BUILDINGS_CHARS;
+      for (const item of matches) {
+        if (item === null) continue;
+        if (fits) item.buildings = buildings;
+        else delete item.buildings;
+      }
+      if (matches.length > 0) save();
+    },
     /** Remove a place from the history. */
     forget(id: string): void {
       places.recent = places.recent.filter((item) => item.id !== id);
