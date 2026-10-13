@@ -371,7 +371,7 @@ try {
     const radius = Math.max(size.x, size.y, size.z, 8) / 2;
     viewRadius = radius;
     frameHouse(camera, controls, box);
-    fitSunShadow(sunLight, radius);
+    fitSunShadow(sunLight, Math.max(size.x, size.z, 8) / 2, size.y);
     shadowRadius = radius;
     const groundSize = Math.max(48, radius * 8);
     ground.geometry.dispose();
@@ -792,7 +792,7 @@ try {
     const reach = new Box3().setFromObject(house).union(new Box3().setFromObject(trees));
     const size = reach.getSize(new Vector3());
     shadowRadius = Math.max(size.x, size.z, 8) / 2;
-    fitSunShadow(sunLight, shadowRadius);
+    fitSunShadow(sunLight, shadowRadius, size.y);
     updateSun();
   }
 

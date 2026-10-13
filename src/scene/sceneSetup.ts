@@ -137,15 +137,24 @@ export function createSunLight(target: Vector3): DirectionalLight {
   return sun;
 }
 
-/** Grow the shadow map so a larger traced or downloaded house still casts on the ground. */
-export function fitSunShadow(sun: DirectionalLight, radius: number): void {
-  const extent = Math.max(24, radius * 1.8);
+/**
+ * Grow the shadow map so a larger traced or downloaded house still casts on the ground. `height`
+ * reaches its shadow out to twice its height, as long as it is with the sun above about 27°.
+ */
+export function fitSunShadow(sun: DirectionalLight, radius: number, height = 0): void {
+  const extent = Math.max(24, radius * 1.8, radius + height * 2);
   sun.shadow.camera.left = -extent;
   sun.shadow.camera.right = extent;
   sun.shadow.camera.top = extent;
   sun.shadow.camera.bottom = -extent;
-  sun.shadow.camera.far = Math.max(90, extent * 4);
   sun.shadow.camera.updateProjectionMatrix();
+  // A finer map over a wide area, so a downtown block keeps crisp shadows next to a tower's.
+  const mapSize = extent > 200 ? 4096 : 2048;
+  if (sun.shadow.mapSize.x !== mapSize) {
+    sun.shadow.mapSize.set(mapSize, mapSize);
+    sun.shadow.map?.dispose();
+    sun.shadow.map = null;
+  }
 }
 
 export function createFillLight(): AmbientLight {
@@ -261,6 +270,11 @@ export function placeSun(
     target.y + towardSun.y * distance,
     target.z + towardSun.z * distance,
   );
+  // Everything lit lies within the distance of the target, so twice it reaches past the far side.
+  if (sun.shadow.camera.far !== distance * 2) {
+    sun.shadow.camera.far = distance * 2;
+    sun.shadow.camera.updateProjectionMatrix();
+  }
 }
 
 export function resizeRenderer(
