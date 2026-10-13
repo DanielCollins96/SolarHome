@@ -77,10 +77,12 @@ const compass = mountCompass(stage, (bearingDeg) => faceBearing(bearingDeg));
 const sunBadge = mountSunBadge(stage);
 let updateSun = () => {};
 let showView = (_view: 'map' | 'plane') => {};
+let clearSelection = () => {};
 const panel = mountControls(app, clock, {
   onChange: () => updateSun(),
   solarNoonMinutes: (isoDate) => solarNoonMinutes(isoDate),
   onView: (view) => showView(view),
+  onClear: () => clearSelection(),
 });
 
 let persistent: KeyValueStore | undefined;
@@ -249,11 +251,16 @@ try {
     onSelect: (hit) => {
       void runSelect(hit);
     },
-    onClear: () => {
-      picked = [];
-      showPicked('Selection cleared.');
-    },
+    onClear: () => clearSelection(),
   });
+  clearSelection = () => {
+    picked = [];
+    showPicked('Selection cleared.');
+  };
+  const setClearEnabled = (enabled: boolean) => {
+    address.setClearEnabled(enabled);
+    panel.setClearEnabled(enabled);
+  };
 
   const placesPanel = mountPlacesPanel(panel.tools, {
     onGo: (place) => goToPlace(place),
@@ -556,11 +563,11 @@ try {
       map.setNote('');
       replaceHouse(new Group());
       scheduleHeat(true);
-      address.setClearEnabled(false);
+      setClearEnabled(false);
       address.setMessage('Nothing selected. Click a building, or shift-drag a box.');
       return;
     }
-    address.setClearEnabled(true);
+    setClearEnabled(true);
     picked = picked.map((building) => cityChecked.get(building.id) ?? building);
     void addCityHeights(note);
     model = assembleBuildings(picked);
@@ -915,7 +922,7 @@ try {
       describeSite(building.label);
       showHouse(model, { syncMap: true, fly: true, demo: false, announce: false });
       const message = `1 building. ${building.label}. Click another to add it, or click this one to remove it.`;
-      address.setClearEnabled(true);
+      setClearEnabled(true);
       address.setMessage(message);
       map.setNote(message);
     } catch (error) {
@@ -941,7 +948,7 @@ try {
       showHouse(model, { syncMap: true, fly: true, demo: false });
       placeLabel = shortLabel(hit.label);
       scheduleVisit();
-      address.setClearEnabled(true);
+      setClearEnabled(true);
       address.setMessage('1 building. Click another to add it, or click this one to remove it.');
     } catch (error) {
       address.setMessage(failureText(error));

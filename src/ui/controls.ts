@@ -28,6 +28,8 @@ export interface ControlsHandle {
   setView(view: 'map' | 'plane'): void;
   /** Marks sunrise and sunset on the time slider, in minutes since local midnight. Null hides a mark. */
   setDaylight(sunrise: number | null, sunset: number | null): void;
+  /** Enables the Clear shown beside the date while the panel is folded. */
+  setClearEnabled(enabled: boolean): void;
   tools: HTMLElement;
 }
 
@@ -38,6 +40,7 @@ export function mountControls(
     onChange: () => void;
     solarNoonMinutes: (isoDate: string) => number;
     onView: (view: 'map' | 'plane') => void;
+    onClear: () => void;
   },
 ): ControlsHandle {
   const panel = document.createElement('aside');
@@ -57,6 +60,7 @@ export function mountControls(
         <label class="sr" for="date">Date</label>
         <input id="date" type="date" value="${clock.date}" aria-label="Date" />
         <strong id="time-label">${formatMinutes(clock.minutes)}</strong>
+        <button id="fold-clear" type="button" disabled>Clear</button>
       </div>
       <div class="time-row">
         <label class="sr" for="time">Local time</label>
@@ -99,6 +103,7 @@ export function mountControls(
   const showPlane = required<HTMLButtonElement>(panel, '#show-plane');
   const playButton = required<HTMLButtonElement>(panel, '#play-time');
   const foldButton = required<HTMLButtonElement>(panel, '#fold-panel');
+  const foldClear = required<HTMLButtonElement>(panel, '#fold-clear');
   const sunriseFlag = required<HTMLElement>(panel, '#sunrise-flag');
   const sunsetFlag = required<HTMLElement>(panel, '#sunset-flag');
   const placeFlag = (flag: HTMLElement, minutes: number | null, arrow: string) => {
@@ -112,6 +117,7 @@ export function mountControls(
     foldButton.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     foldButton.setAttribute('aria-label', collapsed ? 'Show all controls' : 'Show fewer controls');
   });
+  foldClear.addEventListener('click', () => options.onClear());
   const setView = (view: 'map' | 'plane') => {
     showMap.setAttribute('aria-pressed', view === 'map' ? 'true' : 'false');
     showPlane.setAttribute('aria-pressed', view === 'plane' ? 'true' : 'false');
@@ -211,6 +217,9 @@ export function mountControls(
       }
     },
     setView,
+    setClearEnabled(enabled) {
+      foldClear.disabled = !enabled;
+    },
     setDaylight(sunrise, sunset) {
       placeFlag(sunriseFlag, sunrise, '↑');
       placeFlag(sunsetFlag, sunset, '↓');
