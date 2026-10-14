@@ -1,4 +1,4 @@
-import { panelKwhPerM2, type RoofTotal } from '../solar/heatmap.ts';
+import { PANEL_KW_PER_M2, panelKwhPerM2, type RoofTotal } from '../solar/heatmap.ts';
 
 /** What one heatmap square shows when it is clicked. */
 export interface CellReading {
@@ -79,25 +79,28 @@ export function mountCellReadout(stage: HTMLElement): {
           : [`<b>Panel output: about ${Math.round(panelKwhPerM2(reading.kwhPerM2))} kWh a year</b> per m² of solar panel`]),
         flat ? 'Flat roof' : `Faces ${facing}, ${Math.round(reading.tiltDeg)}° slope`,
       ];
-      // Totals: what panels over the whole side, and over the building's best squares, would make.
+      // Totals: how big a system panels over the whole side, and over the building's best squares, would be, and what it would make.
       const measured = reading.cloudLoss !== null;
-      const output = (sunKwh: number) => (measured ? `, <b>about ${roundKwh(panelKwhPerM2(sunKwh))} kWh a year</b>` : '');
+      const system = (areaM2: number, sunKwh: number) =>
+        `About ${roundKw(areaM2 * PANEL_KW_PER_M2)} kW of panels${measured ? `, <b>about ${roundKwh(panelKwhPerM2(sunKwh))} kWh a year</b>` : ''}`;
       const side = reading.side;
       lines.push(
         `<span class="readout-head">This roof side</span>`,
-        `${Math.round(side.areaM2)} m², average ${Math.round(side.meanShare * 100)}%${output(side.kwh)}`,
+        `${Math.round(side.areaM2)} m², average ${Math.round(side.meanShare * 100)}%`,
+        system(side.areaM2, side.kwh),
       );
       const roof = reading.roof;
       if (roof !== null) {
         lines.push(
           `<span class="readout-head">This building's whole roof</span>`,
-          `${Math.round(roof.areaM2)} m², average ${Math.round(roof.meanShare * 100)}%${output(roof.kwh)}`,
+          `${Math.round(roof.areaM2)} m², average ${Math.round(roof.meanShare * 100)}%`,
+          system(roof.areaM2, roof.kwh),
         );
         if (roof.goodM2 >= 1 && roof.goodM2 < roof.areaM2 - 0.5) {
-          lines.push(`Just its ${Math.round(reading.goodShare * 100)}%+ squares: ${Math.round(roof.goodM2)} m²${output(roof.goodKwh)}`);
+          lines.push(`Just its ${Math.round(reading.goodShare * 100)}%+ squares: ${Math.round(roof.goodM2)} m²`, system(roof.goodM2, roof.goodKwh));
         }
       }
-      if (measured) lines.push(`<span class="readout-note">Totals cover every square with panels, edges included.</span>`);
+      lines.push(`<span class="readout-note">Totals cover every square with panels, edges included.</span>`);
       if (reading.areaM2 < 0.95) lines.push(`Edge square: ${reading.areaM2.toFixed(1)} m² of roof`);
       label.innerHTML = lines.map((line) => (line.startsWith('<span class="readout-') ? line : `<span>${line}</span>`)).join('');
       label.prepend(copyButton);
@@ -137,6 +140,12 @@ export function mountCellReadout(stage: HTMLElement): {
       label.hidden = true;
     },
   };
+}
+
+/** Panel rating in kW: one decimal place below 10 kW, two significant figures above. */
+function roundKw(kw: number): string {
+  if (kw < 10) return kw.toFixed(1);
+  return roundKwh(kw);
 }
 
 /** Two significant figures: the estimate is not better than that. */
