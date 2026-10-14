@@ -48,7 +48,13 @@ export function pointInRing(point: PlanPoint, ring: readonly PlanPoint[]): boole
     const a = ring[i];
     const b = ring[j];
     if (a === undefined || b === undefined) continue;
-    if (distanceToSegment(point, a, b) < 1e-6) return true;
+    // Only a point within the edge's extent can be on it, and most edges are far away.
+    const near =
+      point.east >= Math.min(a.east, b.east) - 1e-6 &&
+      point.east <= Math.max(a.east, b.east) + 1e-6 &&
+      point.north >= Math.min(a.north, b.north) - 1e-6 &&
+      point.north <= Math.max(a.north, b.north) + 1e-6;
+    if (near && distanceToSegment(point, a, b) < 1e-6) return true;
     const crosses = a.north > point.north !== b.north > point.north;
     if (!crosses) continue;
     const east = ((b.east - a.east) * (point.north - a.north)) / (b.north - a.north) + a.east;

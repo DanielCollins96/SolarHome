@@ -59,6 +59,7 @@ import { cellAtUv, cellCorners, cellSamples, roofTotal, collectOccluders, create
 import { mountCellReadout } from './ui/cellReadout.ts';
 import { mountContextMenu } from './ui/contextMenu.ts';
 import type { ExposureResult } from './solar/exposure.ts';
+import { blockCasters, buildingCasters, nextCache, savedCells, staleBuildings, type Caster, type HeatCache } from './solar/heatCache.ts';
 import type { RoofGrid } from './solar/roofCells.ts';
 import { roofGrid } from './solar/roofCells.ts';
 import { applyWeather, loadMonthlyWeather, type MonthlyWeather } from './solar/weather.ts';
@@ -144,6 +145,10 @@ const searchAbort = { current: new AbortController() };
 
 /** Wait this long after the last change to the model, trees or neighbours before tracing the sunlight again. */
 const HEAT_DELAY_MS = 600;
+/** The sun and the weather this close count as the same place's, so traced squares can be reused. */
+const SAME_SKY_M = 1_000;
+/** The longest the heatmap waits for the map to report the buildings around a new selection. */
+const NEIGHBOUR_WAIT_MS = 8_000;
 /** More roof squares than this is a district, and tracing a year of sun over it would take minutes. */
 const MAX_HEAT_CELLS = 60_000;
 
@@ -348,9 +353,11 @@ try {
   let heatTimer = 0;
   let heatToken = 0;
   /** A year of sky for the last place, kept because the sun path only changes with the place. */
-  let heatSky: { key: string; sky: SkySamples; clear: SkySamples; idealKwhPerM2: number; weather: MonthlyWeather | null; weatherNote: string } | null = null;
+  let heatSky: { key: string; origin: LngLat; year: number; sky: SkySamples; clear: SkySamples; idealKwhPerM2: number; weather: MonthlyWeather | null; weatherNote: string } | null = null;
   /** The squares and their sunlight behind the overlay on show, for reading one out on a click. */
   /** `faceCloudLoss` is each roof face's sunlight lost to clouds, null without the weather record. */
+  /** Squares already traced, so a change to the selection only traces the roofs it affects. */
+  let heatCache: HeatCache | null = null;
   let heatShown: { grid: RoofGrid; result: ExposureResult; idealKwhPerM2: number; faceCloudLoss: number[] | null } | null = null;
   const cellReadout = mountCellReadout(stage);
   /** The clicked square: where its label is pinned, and its outline. */
@@ -734,7 +741,10 @@ try {
     const { latitude, longitude } = current.origin;
     const year = parseISODate(clock.date).year;
     const key = `${latitude.toFixed(3)},${longitude.toFixed(3)},${year}`;
-    if (heatSky?.key !== key) {
+    // Adding a building moves the model's centre a little. The sun and the weather a few hundred
+    // metres away are the same, and keeping them lets the squares already traced stand.
+    const shift = heatSky === null ? null : projectToLocal(current.origin, heatSky.origin);
+    if (heatSky === null || shift === null || heatSky.year !== year || Math.hypot(shift.east, shift.north) > SAME_SKY_M) {
       heatPanel.setMessage('Fetching the weather record for this place…');
       const clear = skySamples(latitude, longitude, year);
       let weather: MonthlyWeather | null = null;
@@ -746,7 +756,13 @@ try {
       }
       if (token !== heatToken) return;
       const sky = weather === null ? clear : applyWeather(clear, weather);
-      heatSky = { key, sky, clear, idealKwhPerM2: openPlaneYield(idealNormal(latitude), sky), weather, weatherNote };
+      heatSky = { key, origin: current.origin, year, sky, clear, idealKwhPerM2: openPlaneYield(idealNormal(latitude), sky), weather, weatherNote };
+    }
+    // Tracing before the map has found the buildings around a new selection would only be thrown
+    // away when they arrive. A map that never settles, or is hidden, waits no longer than this.
+    if (comparing === null) {
+      await Promise.race([map.settled(), new Promise((resolve) => window.setTimeout(resolve, NEIGHBOUR_WAIT_MS))]);
+      if (token !== heatToken || model !== current) return;
     }
     const { sky, clear, idealKwhPerM2, weather, weatherNote } = heatSky;
     const origin = current.origin;
@@ -755,18 +771,63 @@ try {
     // The map's blocks surround the selection, not compared places standing on open ground.
     const blocks = (comparing !== null ? [] : map.neighbours()).map((block) => ({ ring: projectRing(block.ring, origin), heightM: block.heightM, baseM: block.baseM }));
     const occluders = collectOccluders(current, nearTrees, blocks);
-    const { points, normals } = cellSamples(grid);
-    heatPanel.setProgress(0);
-    let result;
-    try {
-      result = await heatRunner.run({ points, normals, occluders, sky }, (share) => {
-        if (token === heatToken) heatPanel.setProgress(share);
+    // Only squares that are new, or near something whose shade changed, are traced again.
+    const casters: Caster[] = [
+      ...buildingCasters(current),
+      ...blockCasters(comparing !== null ? [] : map.neighbours()),
+      ...nearTrees.map((tree) => {
+        const at = localToLngLat(tree.at, origin);
+        return { key: `tree:${tree.id}:${tree.kind}:${tree.widthM}:${tree.heightM ?? ''}:${at.latitude.toFixed(7)},${at.longitude.toFixed(7)}`, building: null, rings: [[at]] };
+      }),
+    ];
+    const known = heatCache?.sky === heatSky.key ? heatCache : null;
+    const saved = savedCells(known, grid, origin, known === null ? new Set() : staleBuildings(known, casters));
+    const kwh = new Float32Array(grid.cells.length);
+    const open = new Float32Array(grid.cells.length);
+    const missing: number[] = [];
+    saved.forEach((cell, i) => {
+      if (cell === null) {
+        missing.push(i);
+        return;
+      }
+      kwh[i] = cell.kwh;
+      open[i] = cell.open;
+    });
+    if (missing.length > 0) {
+      // The roofs that stand keep their colours while the rest are traced.
+      if (missing.length < grid.cells.length) {
+        const tracing = new Set(missing);
+        const kept = grid.cells.flatMap((cell, i) => (tracing.has(i) ? [] : [{ cell, share: (kwh[i] ?? 0) / idealKwhPerM2 }]));
+        const partial = { faces: grid.faces, cells: kept.map((item) => item.cell) };
+        const keptShares = Float32Array.from(kept, (item) => item.share);
+        showHeat(createHeatOverlay(partial, keptShares), comparing === null ? createHeatOverlay(partial, keptShares) : null);
+      }
+      const all = cellSamples(grid);
+      const points = new Float32Array(missing.length * 3);
+      const normals = new Float32Array(missing.length * 3);
+      missing.forEach((cell, i) => {
+        points.set(all.points.subarray(cell * 3, cell * 3 + 3), i * 3);
+        normals.set(all.normals.subarray(cell * 3, cell * 3 + 3), i * 3);
       });
-    } catch (error) {
-      if (token === heatToken) heatPanel.setMessage(error instanceof Error ? error.message : 'The sunlight calculation stopped.');
-      return;
+      heatPanel.setProgress(0);
+      let traced;
+      try {
+        traced = await heatRunner.run({ points, normals, occluders, sky }, (share) => {
+          if (token === heatToken) heatPanel.setProgress(share);
+        });
+      } catch (error) {
+        if (token === heatToken) heatPanel.setMessage(error instanceof Error ? error.message : 'The sunlight calculation stopped.');
+        return;
+      }
+      if (traced === null || token !== heatToken || model !== current) return;
+      missing.forEach((cell, i) => {
+        kwh[cell] = traced.kwhPerM2[i] ?? 0;
+        open[cell] = traced.openKwhPerM2[i] ?? 0;
+      });
     }
-    if (result === null || token !== heatToken || model !== current) return;
+    if (token !== heatToken || model !== current) return;
+    heatCache = nextCache(known, heatSky.key, casters, grid, origin, kwh, open);
+    const result: ExposureResult = { kwhPerM2: kwh, openKwhPerM2: open };
     const shares = result.kwhPerM2.map((kwh) => kwh / idealKwhPerM2);
     showHeat(createHeatOverlay(grid, shares), comparing === null ? createHeatOverlay(grid, shares) : null);
     // What clouds take from each face: its open-sky year with the weather record against without.

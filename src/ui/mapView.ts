@@ -3,7 +3,7 @@ import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
 import type { ExpressionSpecification, GeoJSONSource, MapGeoJSONFeature, MapMouseEvent } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { localToLngLat, projectToLocal, type LngLat } from '../geo/projection.ts';
+import { localToLngLat, projectToLocal, ringMayContain, ringsMayOverlap, type LngLat } from '../geo/projection.ts';
 import { distanceToSegment, pointInRing } from '../house/planGeometry.ts';
 import { splitEdge, snapTracePoint } from '../trace/mapTrace.ts';
 import type { HouseModel } from '../house/houseModel.ts';
@@ -55,6 +55,8 @@ export interface MapController {
   setHeat(overlay: Group | null): void;
   /** The basemap buildings around the selection that are redrawn in 3D. */
   neighbours(): readonly NeighbourBlock[];
+  /** Resolves once the map has stopped, its tiles are in, and the neighbours above are up to date. */
+  settled(): Promise<void>;
   setOsmRing(ring: LngLat[]): void;
   setOpacity(opacity: number): void;
   setTracing(tracing: boolean): void;
@@ -498,6 +500,13 @@ export function mountMap(
     neighbours() {
       return neighbourBlocks;
     },
+    settled() {
+      return new Promise((resolve) => {
+        if (!map.isMoving() && map.areTilesLoaded() && !basemap.pending()) resolve();
+        // Registered after the basemap's own idle handler, so the neighbours are redrawn first.
+        else map.once('idle', () => resolve());
+      });
+    },
     setOsmRing(ring) {
       osmRing = ring.map((point) => ({ ...point }));
       publish(false);
@@ -590,10 +599,16 @@ function hideBasemapUnderSelection(
   /** How far around the selection to redraw neighbours in 3D. Zero draws none. */
   neighbourReachM: () => number,
   onNeighbours: (blocks: NeighbourBlock[]) => void,
-): { install: () => void; refresh: () => void } {
+): { install: () => void; refresh: () => void; pending: () => boolean } {
   const layers: { id: string; source: string }[] = [];
   type Flattened = { source: string; id: string | number; center: LngLat };
   let hidden = new Map<string, Flattened>();
+  type FoundBuilding = { area: number; blocks: { block: NeighbourBlock; flattened: { key: string; target: Flattened } }[] };
+  /**
+   * The neighbours found last time. The map only answers for the tiles it has loaded, so a
+   * building scrolled off screen would otherwise vanish from the shade and come back later.
+   */
+  let remembered = new Map<string, FoundBuilding>();
   let dirty = false;
   let lastNeighbours = '';
 
@@ -617,7 +632,8 @@ function hideBasemapUnderSelection(
     const found = neighbours(next);
     for (const entry of found) next.set(entry.flattened.key, entry.flattened.target);
     const blocks = found.flatMap((entry) => (entry.block === null ? [] : [entry.block]));
-    const signature = blocks.map((block) => block.key).join('|');
+    // In any order: the same buildings found in another order are the same shade.
+    const signature = blocks.map((block) => block.key).sort().join('|');
     if (signature !== lastNeighbours) {
       lastNeighbours = signature;
       onNeighbours(blocks);
@@ -649,7 +665,7 @@ function hideBasemapUnderSelection(
     const swallowed: { key: string; target: Flattened }[] = [];
     // A building near a tile's edge comes back once per tile, each copy clipped differently.
     // Two copies would draw the same roof twice and flicker, so the most complete one is kept.
-    const found = new Map<string, { area: number; blocks: { block: NeighbourBlock; flattened: { key: string; target: Flattened } }[] }>();
+    const found = new Map<string, FoundBuilding>();
     for (const source of new Set(layers.map((layer) => layer.source))) {
       for (const feature of map.querySourceFeatures(source, { sourceLayer: 'building' })) {
         if (feature.id === undefined || feature.id === null || feature.properties.hide_3d === true) continue;
@@ -682,6 +698,19 @@ function hideBasemapUnderSelection(
         if (blocks.length > 0 && (kept === undefined || area > kept.area)) found.set(flatKey, { area, blocks });
       }
     }
+    // A building the map no longer answers for is off screen, not gone, and one cut short by the
+    // tiles now loaded is still its whole self. The fuller copy stays while it is within reach
+    // and not under the selection.
+    for (const [flatKey, entry] of remembered) {
+      if ((found.get(flatKey)?.area ?? -1) >= entry.area || underSelection.has(flatKey)) continue;
+      const stays = entry.blocks.every(({ block }) => {
+        const at = projectToLocal(centroid(block.ring), first);
+        const inReach = at.east >= minEast && at.east <= maxEast && at.north >= minNorth && at.north <= maxNorth;
+        return inReach && overlapShare(block.ring, rings) < SAME_BUILDING_SHARE;
+      });
+      if (stays) found.set(flatKey, entry);
+    }
+    remembered = new Map(found);
     // The tiles can also hold one building twice under different ids, such as an outline and its
     // part. Coplanar roofs speckle, so a block inside a larger one of about the same height goes.
     const all = [...found.values()].flatMap((entry) => entry.blocks).sort((a, b) => Math.abs(ringAreaM2(b.block.ring)) - Math.abs(ringAreaM2(a.block.ring)));
@@ -736,6 +765,9 @@ function hideBasemapUnderSelection(
     refresh() {
       if (layers.length === 0) return;
       apply();
+    },
+    pending() {
+      return dirty;
     },
   };
 }
@@ -1211,7 +1243,8 @@ function centroid(ring: readonly LngLat[]): LngLat {
 function overlapShare(ring: readonly LngLat[], others: readonly (readonly LngLat[])[]): number {
   const origin = centroid(ring);
   const local = ring.map((point) => projectToLocal(point, origin));
-  const otherLocal = others.map((other) => other.map((point) => projectToLocal(point, origin)));
+  const otherLocal = others.filter((other) => ringsMayOverlap(ring, other)).map((other) => other.map((point) => projectToLocal(point, origin)));
+  if (otherLocal.length === 0) return 0;
   const east = local.map((point) => point.east);
   const north = local.map((point) => point.north);
   const minEast = Math.min(...east);
@@ -1233,6 +1266,7 @@ function overlapShare(ring: readonly LngLat[], others: readonly (readonly LngLat
 }
 
 function ringContains(ring: readonly LngLat[], point: LngLat): boolean {
+  if (!ringMayContain(ring, point)) return false;
   return pointInRing(
     { east: 0, north: 0 },
     ring.map((vertex) => projectToLocal(vertex, point)),

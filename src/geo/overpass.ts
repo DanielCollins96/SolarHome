@@ -1,6 +1,6 @@
 import type { LookupCache } from './cache.ts';
 import { GeoFailure, type GeocodeHit } from './geocode.ts';
-import { projectToLocal } from './projection.ts';
+import { projectToLocal, ringMayContain } from './projection.ts';
 import type { GeographicBuilding, GeographicRing } from '../house/assemble.ts';
 import { parseLengthMeters } from '../house/heightEstimate.ts';
 import { pointInRing } from '../house/planGeometry.ts';
@@ -252,6 +252,7 @@ function waysOf(elements: OverpassElement[]): Map<number, OverpassElement> {
 
 export function buildingContains(building: GeographicBuilding, latitude: number, longitude: number): boolean {
   return building.parts.some((part) => {
+    if (!ringMayContain(part.outer, { latitude, longitude })) return false;
     const local = part.outer.map((point) => projectToLocal(point, { latitude, longitude }));
     return pointInRing({ east: 0, north: 0 }, local);
   });
