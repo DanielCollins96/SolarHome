@@ -134,37 +134,69 @@ export function roofGrid(model: HouseModel): RoofGrid {
     const azimuthDeg = ((Math.atan2(normal.x, -normal.z) * 180) / Math.PI + 360) % 360;
     faces.push({ building: plane.building, normal, tiltDeg, azimuthDeg, origin, u, v, cols, rows, triangles: soup });
 
-    const inside = (pu: number, pv: number) => flat.some(([a, b, c]) => a !== undefined && b !== undefined && c !== undefined && inTriangle(pu, pv, a, b, c));
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        let hits = 0;
-        let sumU = 0;
-        let sumV = 0;
-        for (let i = 0; i < COVER_STEPS; i++) {
-          for (let j = 0; j < COVER_STEPS; j++) {
-            const pu = minU + (col + (i + 0.5) / COVER_STEPS) * CELL_M;
-            const pv = minV + (row + (j + 0.5) / COVER_STEPS) * CELL_M;
-            if (!inside(pu, pv)) continue;
-            hits++;
-            sumU += pu;
-            sumV += pv;
+    // Each triangle marks the sub-samples and centres it covers, visiting only the squares under it.
+    // A face spread over a large building, like many flat roofs at one height, would otherwise test
+    // every triangle at every sample of its whole bounding box.
+    const covered = new Map<number, { samples: Uint8Array; center: boolean }>();
+    for (const [a, b, c] of flat) {
+      if (a === undefined || b === undefined || c === undefined) continue;
+      const fromU = Math.max(0, Math.floor(((Math.min(a.u, b.u, c.u) - minU) / CELL_M) * COVER_STEPS - 0.5));
+      const toU = Math.min(cols * COVER_STEPS - 1, Math.ceil(((Math.max(a.u, b.u, c.u) - minU) / CELL_M) * COVER_STEPS - 0.5));
+      const fromV = Math.max(0, Math.floor(((Math.min(a.v, b.v, c.v) - minV) / CELL_M) * COVER_STEPS - 0.5));
+      const toV = Math.min(rows * COVER_STEPS - 1, Math.ceil(((Math.max(a.v, b.v, c.v) - minV) / CELL_M) * COVER_STEPS - 0.5));
+      for (let su = fromU; su <= toU; su++) {
+        const col = Math.floor(su / COVER_STEPS);
+        const i = su % COVER_STEPS;
+        for (let sv = fromV; sv <= toV; sv++) {
+          const row = Math.floor(sv / COVER_STEPS);
+          const j = sv % COVER_STEPS;
+          const key = row * cols + col;
+          let cell = covered.get(key);
+          const pu = minU + (col + (i + 0.5) / COVER_STEPS) * CELL_M;
+          const pv = minV + (row + (j + 0.5) / COVER_STEPS) * CELL_M;
+          if (cell?.samples[i * COVER_STEPS + j] !== 1 && inTriangle(pu, pv, a, b, c)) {
+            if (cell === undefined) covered.set(key, (cell = { samples: new Uint8Array(COVER_STEPS * COVER_STEPS), center: false }));
+            cell.samples[i * COVER_STEPS + j] = 1;
+          }
+          // The centre lies between samples 3 and 4, so any triangle that reaches it also reaches sample 4.
+          if (i === COVER_STEPS / 2 && j === COVER_STEPS / 2 && cell?.center !== true) {
+            if (inTriangle(minU + (col + 0.5) * CELL_M, minV + (row + 0.5) * CELL_M, a, b, c)) {
+              if (cell === undefined) covered.set(key, (cell = { samples: new Uint8Array(COVER_STEPS * COVER_STEPS), center: false }));
+              cell.center = true;
+            }
           }
         }
-        if (hits === 0) continue;
-        const centerU = minU + (col + 0.5) * CELL_M;
-        const centerV = minV + (row + 0.5) * CELL_M;
-        // A square cut by the roof's edge is measured where its roof is, not out over the gutter.
-        const [pu, pv] = inside(centerU, centerV) ? [centerU, centerV] : [sumU / hits, sumV / hits];
-        const point = add(add(scale(u, pu), scale(v, pv)), scale(normal, along));
-        if (buried(point, normal)) continue;
-        cells.push({
-          face: index,
-          col,
-          row,
-          point,
-          areaM2: (hits / (COVER_STEPS * COVER_STEPS)) * CELL_M * CELL_M,
-        });
       }
+    }
+    // Row by row, as the squares were always listed.
+    for (const key of [...covered.keys()].sort((p, q) => p - q)) {
+      const cover = covered.get(key);
+      if (cover === undefined) continue;
+      const row = Math.floor(key / cols);
+      const col = key % cols;
+      let hits = 0;
+      let sumU = 0;
+      let sumV = 0;
+      for (let i = 0; i < COVER_STEPS; i++) {
+        for (let j = 0; j < COVER_STEPS; j++) {
+          if (cover.samples[i * COVER_STEPS + j] !== 1) continue;
+          hits++;
+          sumU += minU + (col + (i + 0.5) / COVER_STEPS) * CELL_M;
+          sumV += minV + (row + (j + 0.5) / COVER_STEPS) * CELL_M;
+        }
+      }
+      if (hits === 0) continue;
+      // A square cut by the roof's edge is measured where its roof is, not out over the gutter.
+      const [pu, pv] = cover.center ? [minU + (col + 0.5) * CELL_M, minV + (row + 0.5) * CELL_M] : [sumU / hits, sumV / hits];
+      const point = add(add(scale(u, pu), scale(v, pv)), scale(normal, along));
+      if (buried(point, normal)) continue;
+      cells.push({
+        face: index,
+        col,
+        row,
+        point,
+        areaM2: (hits / (COVER_STEPS * COVER_STEPS)) * CELL_M * CELL_M,
+      });
     }
   }
   return { faces, cells };
